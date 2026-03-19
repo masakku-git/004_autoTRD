@@ -77,11 +77,11 @@ def screen_ticker(ticker: str, df: pd.DataFrame) -> dict | None:
 
     return {
         "ticker": ticker,
-        "last_close": round(last_close, 2),
+        "last_close": float(round(last_close, 2)),
         "avg_volume": int(avg_volume),
-        "atr": round(atr.iloc[-1], 2),
-        "atr_pct": round(atr_pct, 2),
-        "relative_strength": round(rs, 2),
+        "atr": float(round(atr.iloc[-1], 2)),
+        "atr_pct": float(round(atr_pct, 2)),
+        "relative_strength": float(round(rs, 2)),
     }
 
 
@@ -103,7 +103,7 @@ def run_screening(
         result = screen_ticker(ticker, df)
         if result:
             # Composite score: weight RS and ATR
-            result["score"] = result["relative_strength"] * 0.6 + result["atr_pct"] * 0.4
+            result["score"] = float(result["relative_strength"] * 0.6 + result["atr_pct"] * 0.4)
             candidates.append(result)
 
     # Sort by composite score descending
