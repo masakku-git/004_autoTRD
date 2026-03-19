@@ -17,6 +17,7 @@ class Signal:
     stop_loss: float  # price level
     take_profit: float  # price level
     reason: str  # human-readable explanation
+    price: float = 0.0  # entry price at signal generation time
 
 
 class BaseStrategy(ABC):
