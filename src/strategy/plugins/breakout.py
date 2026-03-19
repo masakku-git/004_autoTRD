@@ -65,6 +65,7 @@ class Breakout(BaseStrategy):
                     f"Bullish breakout above {self.lookback}-day high "
                     f"({recent_high:.2f}). Vol={current_volume/avg_volume:.1f}x avg"
                 ),
+                price=round(current_price, 2),
             )
 
         # Bearish breakdown: price below recent low + volume (for exit signals)
@@ -81,6 +82,7 @@ class Breakout(BaseStrategy):
                     f"Bearish breakdown below {self.lookback}-day low "
                     f"({recent_low:.2f}). Vol={current_volume/avg_volume:.1f}x avg"
                 ),
+                price=round(current_price, 2),
             )
 
         return None

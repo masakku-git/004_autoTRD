@@ -62,8 +62,13 @@ def approve_trade(
     # risk_amount = equity * risk_per_trade_pct
     # quantity = risk_amount / (entry_price - stop_loss)
     risk_amount = account.total_equity * settings.risk_per_trade_pct
-    # Estimate entry price (use stop_loss to derive; entry ≈ between stop_loss and take_profit)
-    entry_estimate = (signal.stop_loss + signal.take_profit) / 2
+    # エントリー価格はシグナル生成時の実際の現在値を使う。
+    # 修正前: (stop_loss + take_profit) / 2 → SL/TPの中間値を使っていたため、
+    #         戦略によってはATR倍率が非対称（例: SL=2ATR, TP=3ATR）な場合に
+    #         実際の価格と大きくズレてポジションサイズが不正確になっていた。
+    # 修正後: signal.price（戦略が設定した現在値）を優先し、未設定（0）の場合のみ
+    #         SL/TP中間値にフォールバックして互換性を維持する。
+    entry_estimate = signal.price if signal.price > 0 else (signal.stop_loss + signal.take_profit) / 2
     risk_per_share = abs(entry_estimate - signal.stop_loss)
 
     if risk_per_share <= 0:

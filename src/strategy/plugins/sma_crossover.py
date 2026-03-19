@@ -57,6 +57,7 @@ class SMACrossover(BaseStrategy):
                     f"SMA{self.short_period} crossed above SMA{self.long_period}. "
                     f"Price={current_price:.2f}, ATR={atr:.2f}"
                 ),
+                price=round(current_price, 2),
             )
 
         # Death cross: SELL
@@ -71,6 +72,7 @@ class SMACrossover(BaseStrategy):
                     f"SMA{self.short_period} crossed below SMA{self.long_period}. "
                     f"Price={current_price:.2f}"
                 ),
+                price=round(current_price, 2),
             )
 
         return None

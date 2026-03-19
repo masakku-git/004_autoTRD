@@ -45,8 +45,11 @@ class RSIReversal(BaseStrategy):
         if pd.isna(atr):
             return None
 
-        # Oversold reversal: RSI was below threshold and is now rising
-        if prev_rsi < self.oversold and current_rsi > prev_rsi:
+        # 売られすぎからの反発：RSIが閾値を「下から上へクロス」した時だけ発動。
+        # 修正前: current_rsi > prev_rsi だと閾値以下で0.01上昇しても発動してしまう（弱すぎ）。
+        # 修正後: prev_rsi < oversold かつ current_rsi >= oversold を条件にすることで、
+        #         RSIが30を実際に上抜けた1本のみシグナルを発生させる。
+        if prev_rsi < self.oversold and current_rsi >= self.oversold:
             stop_loss = current_price - 1.5 * atr
             take_profit = current_price + 2 * atr
             return Signal(
@@ -56,13 +59,16 @@ class RSIReversal(BaseStrategy):
                 stop_loss=round(stop_loss, 2),
                 take_profit=round(take_profit, 2),
                 reason=(
-                    f"RSI oversold reversal. RSI={current_rsi:.1f} "
+                    f"RSI crossed above oversold threshold. RSI={current_rsi:.1f} "
                     f"(prev={prev_rsi:.1f}), Price={current_price:.2f}"
                 ),
+                price=round(current_price, 2),
             )
 
-        # Overbought reversal: RSI was above threshold and is now falling
-        if prev_rsi > self.overbought and current_rsi < prev_rsi:
+        # 買われすぎからの反落：RSIが閾値を「上から下へクロス」した時だけ発動。
+        # 修正前: current_rsi < prev_rsi だと閾値以上で0.01下落しても発動してしまう（弱すぎ）。
+        # 修正後: prev_rsi > overbought かつ current_rsi <= overbought を条件にする。
+        if prev_rsi > self.overbought and current_rsi <= self.overbought:
             return Signal(
                 ticker=ticker,
                 action="SELL",
@@ -70,9 +76,10 @@ class RSIReversal(BaseStrategy):
                 stop_loss=current_price + 1.5 * atr,
                 take_profit=current_price - 2 * atr,
                 reason=(
-                    f"RSI overbought reversal. RSI={current_rsi:.1f} "
+                    f"RSI crossed below overbought threshold. RSI={current_rsi:.1f} "
                     f"(prev={prev_rsi:.1f}), Price={current_price:.2f}"
                 ),
+                price=round(current_price, 2),
             )
 
         return None
