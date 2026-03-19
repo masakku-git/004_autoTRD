@@ -53,9 +53,9 @@ def run_daily():
     # 前日比の損失が上限（3%）を超えていたら新規エントリーを停止
     prev_snapshot = _get_previous_equity()
     if prev_snapshot > 0 and check_daily_loss_limit(account, prev_snapshot):
-        msg = "Daily loss limit breached — halting new entries"
+        msg = "日次損失上限に到達 — 新規エントリーを停止します"
         logger.warning(msg)
-        send_notification("Trading Halted", msg, level="warning")
+        send_notification("取引停止", msg, level="warning")
         return
 
     # --- Step 3: 市場環境の判定（S&P500トレンド・VIX・レジーム分類） ---
@@ -146,12 +146,12 @@ def run_daily():
                 f"BUY {approval.quantity}x {signal.ticker}: {signal.reason[:60]}"
             )
 
-    # --- Step 7: 日次レポート作成 & LINE通知 ---
+    # --- Step 7: 日次レポート作成 & Slack通知 ---
     summary = _build_summary(
         account, market_condition, candidates, executed_orders, rejected_signals
     )
     logger.info(summary)
-    send_notification("Daily Trading Report", summary)
+    send_notification("日次トレーディングレポート", summary)
 
     logger.info("Daily run completed")
 
@@ -200,25 +200,29 @@ def _build_summary(
     account, market_condition, candidates, executed_orders, rejected_signals=None
 ) -> str:
     rejected_signals = rejected_signals or []
+    regime_ja = {"trending": "トレンド", "range": "レンジ", "volatile": "高ボラ"}.get(
+        market_condition.get("regime", ""), market_condition.get("regime", "N/A")
+    )
+    trend_ja = {"bull": "強気", "bear": "弱気", "neutral": "中立"}.get(
+        market_condition.get("sp500_trend", ""), market_condition.get("sp500_trend", "N/A")
+    )
     lines = [
-        f"Date: {today_jst()}",
-        f"Market: {market_condition.get('regime', 'N/A')} "
-        f"(S&P500: {market_condition.get('sp500_trend', 'N/A')}, "
-        f"VIX: {market_condition.get('vix_level', 0):.1f})",
-        f"Equity: ${account.total_equity:.2f} | Cash: ${account.cash:.2f}",
-        f"Positions: {len(account.positions)}",
-        f"Candidates screened: {len(candidates)}",
-        f"Orders executed: {len(executed_orders)}",
+        f"日付: {today_jst()}",
+        f"市場: {regime_ja} (S&P500: {trend_ja}, VIX: {market_condition.get('vix_level', 0):.1f})",
+        f"総資産: ${account.total_equity:.2f} | 現金: ${account.cash:.2f}",
+        f"保有ポジション: {len(account.positions)}",
+        f"スクリーニング候補: {len(candidates)}銘柄",
+        f"約定注文: {len(executed_orders)}件",
     ]
     for order in executed_orders:
         lines.append(f"  - {order}")
     if rejected_signals:
-        lines.append(f"Rejected by critic: {len(rejected_signals)}")
+        lines.append(f"批判評価で却下: {len(rejected_signals)}件")
         for signal, verdict in rejected_signals:
             top_objection = verdict.objections[0].reason if verdict.objections else "N/A"
             lines.append(
                 f"  x {signal.action} {signal.ticker} "
-                f"({verdict.original_confidence:.2f}->{verdict.adjusted_confidence:.2f}): "
+                f"(信頼度 {verdict.original_confidence:.2f}->{verdict.adjusted_confidence:.2f}): "
                 f"{top_objection[:60]}"
             )
     return "\n".join(lines)
