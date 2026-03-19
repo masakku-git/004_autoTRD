@@ -1,4 +1,4 @@
-"""Market screener for candidate stock selection."""
+"""銘柄スクリーニング（価格・出来高・ATR・相対強度で候補銘柄を絞り込み）"""
 from __future__ import annotations
 
 from datetime import date
@@ -10,7 +10,7 @@ from src.models.base import get_session
 from src.models.market import ScreeningResult
 from src.utils.logger import logger
 
-# Default universe: S&P 500 large-cap tickers (curated subset for MVP)
+# スクリーニング対象銘柄（S&P500大型株から50銘柄を厳選）
 DEFAULT_UNIVERSE = [
     "AAPL", "MSFT", "AMZN", "NVDA", "GOOGL", "META", "TSLA", "BRK-B",
     "UNH", "JNJ", "V", "XOM", "JPM", "PG", "MA", "HD", "CVX", "MRK",
@@ -20,12 +20,12 @@ DEFAULT_UNIVERSE = [
     "INTC", "QCOM", "AMAT", "ADP", "SBUX",
 ]
 
-# Screening thresholds
-MIN_AVG_VOLUME = 500_000
-MIN_PRICE = 5.0
-MAX_PRICE = 500.0
-MIN_ATR_PCT = 1.0  # Minimum ATR as % of price (need volatility for swing)
-LOOKBACK_DAYS = 20
+# スクリーニング閾値
+MIN_AVG_VOLUME = 500_000   # 最低平均出来高
+MIN_PRICE = 5.0            # 最低株価
+MAX_PRICE = 500.0          # 最高株価
+MIN_ATR_PCT = 1.0          # 最低ATR%（スイングに必要なボラティリティ）
+LOOKBACK_DAYS = 20         # 判定に使う直近営業日数
 
 
 def calculate_atr(df: pd.DataFrame, period: int = 14) -> pd.Series:

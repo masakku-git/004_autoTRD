@@ -1,4 +1,4 @@
-"""Order execution via moomoo API."""
+"""注文執行（moomoo APIへの発注・トレードログの記録・DRY_RUNモード対応）"""
 from __future__ import annotations
 
 from datetime import datetime

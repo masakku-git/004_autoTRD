@@ -1,4 +1,4 @@
-"""Utility helpers."""
+"""ユーティリティ（JST日時取得・米国市場営業日チェック）"""
 from datetime import date, datetime
 from zoneinfo import ZoneInfo
 

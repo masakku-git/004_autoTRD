@@ -1,4 +1,4 @@
-"""Base strategy interface for the plugin system."""
+"""戦略プラグインの基底クラス（全戦略はこのBaseStrategyを継承して実装する）"""
 from __future__ import annotations
 
 from abc import ABC, abstractmethod

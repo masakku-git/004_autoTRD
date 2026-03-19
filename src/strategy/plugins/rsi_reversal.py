@@ -1,8 +1,8 @@
-"""RSI Mean-Reversion strategy plugin.
+"""RSI逆張り戦略プラグイン
 
-Buy when RSI drops below oversold level and starts recovering.
-Sell when RSI rises above overbought level and starts declining.
-Best suited for range-bound markets.
+RSIが売られすぎ（30以下）から反発し始めたら買い。
+RSIが買われすぎ（70以上）から下落し始めたら売り。
+レンジ相場向け。
 """
 from __future__ import annotations
 

@@ -1,3 +1,4 @@
+"""ポートフォリオの日次スナップショット（資産推移の追跡用）"""
 from __future__ import annotations
 
 from datetime import date
@@ -10,6 +11,7 @@ from src.models.base import Base
 
 
 class PortfolioSnapshot(Base):
+    """日次の資産状態（総資産・現金・保有ポジション一覧）"""
     __tablename__ = "portfolio_snapshots"
 
     id: Mapped[int] = mapped_column(primary_key=True)

@@ -1,8 +1,9 @@
-"""SMA Crossover strategy plugin.
+"""SMAクロスオーバー戦略プラグイン
 
-Buy when short SMA crosses above long SMA (golden cross).
-Sell when short SMA crosses below long SMA (death cross).
-Stop-loss at recent swing low minus ATR buffer.
+ゴールデンクロス（短期SMA20が長期SMA50を上抜け）で買い、
+デッドクロス（短期SMAが長期SMAを下抜け）で売り。
+ストップロスはATRの2倍、利確はATRの3倍で設定。
+トレンド相場向け。
 """
 from __future__ import annotations
 

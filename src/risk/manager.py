@@ -1,4 +1,4 @@
-"""Risk management and position sizing."""
+"""リスク管理（ポジションサイズ算出・5段階ルールチェック・日次損失制限）"""
 from __future__ import annotations
 
 from dataclasses import dataclass

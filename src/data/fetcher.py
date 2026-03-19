@@ -1,4 +1,4 @@
-"""Stock price data fetcher with yfinance + DB cache."""
+"""株価データ取得（yfinanceからOHLCVを取得しDBにキャッシュ、差分更新対応）"""
 from __future__ import annotations
 
 import time

@@ -1,4 +1,4 @@
-"""Market condition assessment and strategy selection."""
+"""市場環境の判定（S&P500/VIXからレジーム分類）と、レジームに適した戦略の選択"""
 from __future__ import annotations
 
 from datetime import date

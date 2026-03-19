@@ -1,7 +1,8 @@
-"""Price Breakout strategy plugin.
+"""ブレイクアウト戦略プラグイン
 
-Buy when price breaks above recent high with volume confirmation.
-Works in trending and volatile markets.
+直近20日高値を出来高増加（平均の1.5倍以上）と共に上抜けたら買い。
+直近20日安値を出来高増加と共に下抜けたら売り。
+全レジーム対応。
 """
 from __future__ import annotations
 

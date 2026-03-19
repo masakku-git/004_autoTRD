@@ -1,13 +1,10 @@
-"""Devil's Advocate agent — critically evaluates trading signals before execution.
+"""Devil's Advocate（批判的評価エージェント）— 売買シグナルを多角的に検証し、不適切な取引を排除する。
 
-Each check function examines the signal from a skeptical perspective,
-looking for reasons the trade might fail. Objections reduce the signal's
-confidence score. If the adjusted confidence drops below the threshold,
-the signal is rejected.
+各チェック関数がシグナルを懐疑的に評価し、失敗の可能性がある理由を探す。
+指摘(Objection)ごとに信頼度が減点され、閾値を下回ると取引が却下される。
 
-Checks are independent and additive — new checks can be added without
-modifying existing ones. All evaluations are logged to the database
-for post-hoc PDCA analysis.
+チェックは独立・加算式 — 既存チェックを変更せずに新チェックを追加可能。
+全評価結果はDBに保存され、PDCA分析に活用する。
 """
 from __future__ import annotations
 
@@ -52,7 +49,7 @@ class CriticVerdict:
 # ---------------------------------------------------------------------------
 
 
-def check_trend_contradiction(
+def check_trend_contradiction(  # チェック1: 市場トレンドとの矛盾（弱気相場での買い等）
     signal: Signal, df: pd.DataFrame, market_condition: dict
 ) -> list[Objection]:
     """Reject BUY in bear market or SELL in strong bull market."""
@@ -79,7 +76,7 @@ def check_trend_contradiction(
     return objections
 
 
-def check_vix_risk(
+def check_vix_risk(  # チェック2: VIX高水準時のリスク警告
     signal: Signal, df: pd.DataFrame, market_condition: dict
 ) -> list[Objection]:
     """High VIX = high uncertainty. Penalize new entries."""
@@ -108,7 +105,7 @@ def check_vix_risk(
     return objections
 
 
-def check_volume_decline(
+def check_volume_decline(  # チェック3: 出来高減少（シグナルの信頼性低下）
     signal: Signal, df: pd.DataFrame, market_condition: dict
 ) -> list[Objection]:
     """A breakout or crossover on declining volume is unreliable."""
@@ -132,7 +129,7 @@ def check_volume_decline(
     return objections
 
 
-def check_overextended_price(
+def check_overextended_price(  # チェック4: 過度な値動き（高値追い・パニック売り検出）
     signal: Signal, df: pd.DataFrame, market_condition: dict
 ) -> list[Objection]:
     """Buying after a large recent run-up is chasing. Selling after a crash is panic."""
@@ -177,7 +174,7 @@ def check_overextended_price(
     return objections
 
 
-def check_risk_reward_ratio(
+def check_risk_reward_ratio(  # チェック5: リスク/リワード比（1.5:1未満は警告）
     signal: Signal, df: pd.DataFrame, market_condition: dict
 ) -> list[Objection]:
     """Risk/reward below 1:1.5 is not worth the trade."""
@@ -221,7 +218,7 @@ def check_risk_reward_ratio(
     return objections
 
 
-def check_resistance_proximity(
+def check_resistance_proximity(  # チェック6: レジスタンス近接（60日高値付近での買い警告）
     signal: Signal, df: pd.DataFrame, market_condition: dict
 ) -> list[Objection]:
     """Buying near a strong resistance level reduces upside."""
@@ -245,7 +242,7 @@ def check_resistance_proximity(
     return objections
 
 
-def check_recent_loss_on_same_ticker(
+def check_recent_loss_on_same_ticker(  # チェック7: 同一銘柄での直近損失履歴
     signal: Signal, df: pd.DataFrame, market_condition: dict
 ) -> list[Objection]:
     """If the same strategy recently lost money on this ticker, be skeptical."""
@@ -285,7 +282,7 @@ def check_recent_loss_on_same_ticker(
     return objections
 
 
-def check_low_liquidity_hours(
+def check_low_liquidity_hours(  # チェック8: 流動性不足（日次出来高$5M未満）
     signal: Signal, df: pd.DataFrame, market_condition: dict
 ) -> list[Objection]:
     """Warn if average volume is low for the stock's price level."""

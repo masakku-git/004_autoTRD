@@ -1,4 +1,4 @@
-"""Database model for Devil's Advocate (critic) evaluation records."""
+"""Devil's Advocate評価記録のDBモデル（シグナルごとの指摘・信頼度・判定結果を保存）"""
 from __future__ import annotations
 
 from datetime import datetime

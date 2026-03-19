@@ -1,4 +1,4 @@
-"""Account information retrieval from moomoo API."""
+"""口座情報の取得（moomoo APIから残高・ポジションを取得、DRY_RUNではシミュレーション値を返す）"""
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -9,6 +9,7 @@ from src.utils.logger import logger
 
 @dataclass
 class AccountInfo:
+    """口座情報（総資産・現金・時価評価額・保有ポジション一覧）"""
     total_equity: float
     cash: float
     market_value: float
@@ -16,7 +17,7 @@ class AccountInfo:
 
 
 def get_account_info() -> AccountInfo:
-    """Fetch account balance and positions from moomoo."""
+    """moomooから口座残高とポジションを取得（DRY_RUN時はシミュレーション値）"""
     if settings.dry_run:
         logger.info("DRY_RUN: returning simulated account info")
         return AccountInfo(

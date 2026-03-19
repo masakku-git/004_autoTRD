@@ -1,4 +1,4 @@
-"""Auto-discovery and registration of strategy plugins."""
+"""戦略プラグインの自動発見・登録（plugins/ディレクトリのBaseStrategy子クラスを自動読み込み）"""
 from __future__ import annotations
 
 import importlib

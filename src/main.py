@@ -36,22 +36,21 @@ def run_daily():
         logger.info("Not a US market day, skipping")
         return
 
-    # --- Step 1: Initialize ---
+    # --- Step 1: DB初期化 & 戦略プラグイン読み込み ---
     init_db()
     discover_strategies()
 
-    # --- Step 2: Sync account state ---
+    # --- Step 2: 口座情報の取得（残高・ポジション） ---
     account = get_account_info()
     logger.info(
         f"Account: equity=${account.total_equity:.2f}, "
         f"cash=${account.cash:.2f}, positions={len(account.positions)}"
     )
 
-    # Save portfolio snapshot
+    # ポートフォリオのスナップショットをDBに保存（日次記録）
     _save_portfolio_snapshot(account)
 
-    # Check daily loss limit (compare with yesterday's equity)
-    # For MVP, we skip this check on first run
+    # 前日比の損失が上限（3%）を超えていたら新規エントリーを停止
     prev_snapshot = _get_previous_equity()
     if prev_snapshot > 0 and check_daily_loss_limit(account, prev_snapshot):
         msg = "Daily loss limit breached — halting new entries"
@@ -59,20 +58,20 @@ def run_daily():
         send_notification("Trading Halted", msg, level="warning")
         return
 
-    # --- Step 3: Assess market conditions ---
+    # --- Step 3: 市場環境の判定（S&P500トレンド・VIX・レジーム分類） ---
     market_condition = assess_market_condition()
 
-    # --- Step 4: Screen candidates ---
+    # --- Step 4: 銘柄スクリーニング（50銘柄→上位15銘柄に絞り込み） ---
     candidates = run_screening()
     logger.info(f"Screened {len(candidates)} candidates")
 
-    # --- Step 5: Generate signals + Devil's Advocate evaluation ---
+    # --- Step 5: シグナル生成 + Devil's Advocate（批判的評価）によるフィルタリング ---
     strategies = select_strategies(market_condition)
     buy_signals = []
     sell_signals = []
     rejected_signals = []
 
-    # Check existing positions for exit signals
+    # 保有ポジションに対して売却シグナルをチェック
     for pos in account.positions:
         ticker = pos["ticker"].replace("US.", "")
         df = get_ohlcv(ticker)
@@ -90,7 +89,7 @@ def run_daily():
                     rejected_signals.append((signal, verdict))
                 break
 
-    # Check candidates for entry signals
+    # スクリーニング通過銘柄に対して買いシグナルをチェック
     for candidate in candidates:
         ticker = candidate["ticker"]
         df = get_ohlcv(ticker, ensure_updated=False)
@@ -113,10 +112,10 @@ def run_daily():
         f"{len(rejected_signals)} REJECTED by critic"
     )
 
-    # --- Step 6: Execute trades ---
+    # --- Step 6: 注文実行（リスク管理チェック後に発注） ---
     executed_orders = []
 
-    # Process SELL signals first (free up capital)
+    # 売り注文を先に処理（資金を解放してから買いに回す）
     for signal in sell_signals:
         approval = approve_trade(signal, account)
         if approval.approved:
@@ -133,7 +132,7 @@ def run_daily():
                     f"SELL {qty}x {signal.ticker}: {signal.reason[:60]}"
                 )
 
-    # Process BUY signals (sorted by confidence)
+    # 買い注文を信頼度順に処理（ポジションサイズはリスク管理が算出）
     buy_signals.sort(key=lambda s: s.confidence, reverse=True)
     for signal in buy_signals:
         # Refresh account after sells
@@ -147,7 +146,7 @@ def run_daily():
                 f"BUY {approval.quantity}x {signal.ticker}: {signal.reason[:60]}"
             )
 
-    # --- Step 7: Report ---
+    # --- Step 7: 日次レポート作成 & LINE通知 ---
     summary = _build_summary(
         account, market_condition, candidates, executed_orders, rejected_signals
     )
@@ -158,15 +157,27 @@ def run_daily():
 
 
 def _save_portfolio_snapshot(account) -> None:
+    from sqlalchemy import select
+
     with get_session() as session:
-        snapshot = PortfolioSnapshot(
-            date=today_jst(),
-            total_equity=account.total_equity,
-            cash=account.cash,
-            positions_json=account.positions,
-            num_positions=len(account.positions),
-        )
-        session.merge(snapshot)
+        existing = session.execute(
+            select(PortfolioSnapshot).where(PortfolioSnapshot.date == today_jst())
+        ).scalar_one_or_none()
+
+        if existing:
+            existing.total_equity = account.total_equity
+            existing.cash = account.cash
+            existing.positions_json = account.positions
+            existing.num_positions = len(account.positions)
+        else:
+            snapshot = PortfolioSnapshot(
+                date=today_jst(),
+                total_equity=account.total_equity,
+                cash=account.cash,
+                positions_json=account.positions,
+                num_positions=len(account.positions),
+            )
+            session.add(snapshot)
         session.commit()
 
 

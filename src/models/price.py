@@ -1,3 +1,4 @@
+"""株価データキャッシュのDBモデル（yfinanceから取得したOHLCVを保存）"""
 from __future__ import annotations
 
 from datetime import date
@@ -9,6 +10,7 @@ from src.models.base import Base
 
 
 class PriceCache(Base):
+    """日足OHLCVデータのキャッシュ（銘柄+日付でユニーク）"""
     __tablename__ = "price_cache"
     __table_args__ = (
         UniqueConstraint("ticker", "date", name="uq_price_ticker_date"),

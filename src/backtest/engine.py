@@ -1,4 +1,4 @@
-"""Vectorized backtesting engine."""
+"""バックテストエンジン（過去データで戦略を検証し、リターン・シャープ比・勝率等を算出）"""
 from __future__ import annotations
 
 from dataclasses import dataclass

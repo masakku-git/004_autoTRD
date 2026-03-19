@@ -1,4 +1,4 @@
-"""Notification system (LINE Notify)."""
+"""LINE Notify通知（日次レポート・警告・エラーをLINEに送信）"""
 import requests
 
 from config.settings import settings

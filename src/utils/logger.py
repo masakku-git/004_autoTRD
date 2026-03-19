@@ -1,3 +1,4 @@
+"""ロガー設定（config/logging.yamlからコンソール+ファイル出力を構成）"""
 import logging
 import logging.config
 import pathlib

@@ -1,3 +1,4 @@
+"""市場環境とスクリーニング結果のDBモデル"""
 from __future__ import annotations
 
 from datetime import date
@@ -11,18 +12,20 @@ from src.models.base import Base
 
 
 class MarketCondition(Base):
+    """日次の市場環境レコード（S&P500トレンド・VIX・レジーム分類）"""
     __tablename__ = "market_conditions"
 
     id: Mapped[int] = mapped_column(primary_key=True)
     date: Mapped[date] = mapped_column(Date, unique=True)
     sp500_trend: Mapped[str] = mapped_column(String(10))  # bull/bear/neutral
-    vix_level: Mapped[float] = mapped_column(Float)
-    market_breadth: Mapped[float] = mapped_column(Float)
-    regime: Mapped[str] = mapped_column(String(20))  # trending/range/volatile
+    vix_level: Mapped[float] = mapped_column(Float)        # VIX指数の値
+    market_breadth: Mapped[float] = mapped_column(Float)    # 市場の広がり指標
+    regime: Mapped[str] = mapped_column(String(20))         # trending/range/volatile
     notes: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
 
 class ScreeningResult(Base):
+    """銘柄スクリーニングの結果（日次で全候補と選定銘柄を記録）"""
     __tablename__ = "screening_results"
 
     id: Mapped[int] = mapped_column(primary_key=True)

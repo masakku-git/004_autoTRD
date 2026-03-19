@@ -1,3 +1,4 @@
+"""戦略メタデータとバックテスト結果のDBモデル"""
 from __future__ import annotations
 
 from datetime import date, datetime
@@ -10,6 +11,7 @@ from src.models.base import Base
 
 
 class StrategyMeta(Base):
+    """戦略の基本情報（名前・バージョン・対象レジーム・有効/無効）"""
     __tablename__ = "strategy_metadata"
 
     id: Mapped[int] = mapped_column(primary_key=True)
@@ -22,6 +24,7 @@ class StrategyMeta(Base):
 
 
 class BacktestResult(Base):
+    """バックテスト実行結果（リターン・シャープ比・勝率等の統計）"""
     __tablename__ = "backtest_results"
 
     id: Mapped[int] = mapped_column(primary_key=True)

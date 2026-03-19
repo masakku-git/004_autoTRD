@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Initialize the database with all tables."""
+"""DB初期化スクリプト（全テーブルを作成する）"""
 import sys
 from pathlib import Path
 
