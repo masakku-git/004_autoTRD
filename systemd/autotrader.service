@@ -6,5 +6,6 @@ After=network.target opend.service
 Type=oneshot
 User=trader
 WorkingDirectory=/home/trader/autoTRD
-ExecStart=/usr/bin/python3 -m src.main
+ExecStart=/home/trader/autoTRD/.venv/bin/python -m src.main
 Environment=PYTHONPATH=/home/trader/autoTRD
+EnvironmentFile=/home/trader/autoTRD/.env
