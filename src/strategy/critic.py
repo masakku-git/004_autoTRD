@@ -20,7 +20,7 @@ from src.strategy.base import Signal
 from src.utils.logger import logger
 
 # Minimum confidence after critic review to proceed with the trade
-APPROVAL_THRESHOLD = 0.35
+APPROVAL_THRESHOLD = 0.25
 
 
 @dataclass
@@ -69,7 +69,7 @@ def check_trend_contradiction(  # チェック1: 市場トレンドとの矛盾�
         objections.append(
             Objection(
                 check="trend_contradiction",
-                penalty=0.10,
+                penalty=0.05,
                 reason="Market trend is neutral — no tailwind for longs",
             )
         )
@@ -234,7 +234,7 @@ def check_resistance_proximity(  # チェック6: レジスタンス近接（60�
         objections.append(
             Objection(
                 check="resistance_proximity",
-                penalty=0.15,
+                penalty=0.08,
                 reason=f"Price ${current_price:.2f} is within 2% of "
                 f"60-day high ${high_60d:.2f} — likely resistance overhead",
             )

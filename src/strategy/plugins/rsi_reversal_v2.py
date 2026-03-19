@@ -21,24 +21,30 @@ from src.strategy.base import BaseStrategy, Signal
 class RSIReversalV2(BaseStrategy):
     name = "rsi_reversal"
     version = "2.0"
-    target_regime = "range"
+    target_regime = "any"
 
     def __init__(
         self,
         rsi_period: int = 14,
-        oversold: float = 30.0,
-        overbought: float = 70.0,
+        oversold: float = 35.0,
+        overbought: float = 65.0,
         atr_period: int = 14,
+        max_hold_days: int = 10,
     ):
         self.rsi_period = rsi_period
         self.oversold = oversold
         self.overbought = overbought
         self.atr_period = atr_period
+        self.max_hold_days = max_hold_days
 
     def generate_signals(
         self, ticker: str, df: pd.DataFrame, market_condition: dict
     ) -> Signal | None:
         if len(df) < self.rsi_period + 5:
+            return None
+
+        # ベア相場フィルター: S&P500が弱気トレンドの時はBUYを出さない。
+        if market_condition.get("sp500_trend") == "bear":
             return None
 
         rsi = self._calculate_rsi(df["Close"])
@@ -58,7 +64,7 @@ class RSIReversalV2(BaseStrategy):
         #         RSIが30を実際に上抜けた1本のみシグナルを発生させる。
         if prev_rsi < self.oversold and current_rsi >= self.oversold:
             stop_loss = current_price - 1.5 * atr
-            take_profit = current_price + 2 * atr
+            take_profit = current_price + 3.0 * atr
             return Signal(
                 ticker=ticker,
                 action="BUY",
@@ -70,6 +76,7 @@ class RSIReversalV2(BaseStrategy):
                     f"(prev={prev_rsi:.1f}), Price={current_price:.2f}"
                 ),
                 price=round(current_price, 2),
+                max_hold_days=self.max_hold_days,
             )
 
         # 買われすぎからの反落: RSIが閾値を「上から下へクロス」した時だけ発動。
@@ -81,12 +88,13 @@ class RSIReversalV2(BaseStrategy):
                 action="SELL",
                 confidence=self._calc_confidence(current_rsi, "overbought"),
                 stop_loss=current_price + 1.5 * atr,
-                take_profit=current_price - 2 * atr,
+                take_profit=current_price - 3.0 * atr,
                 reason=(
                     f"RSI crossed below overbought threshold. RSI={current_rsi:.1f} "
                     f"(prev={prev_rsi:.1f}), Price={current_price:.2f}"
                 ),
                 price=round(current_price, 2),
+                max_hold_days=self.max_hold_days,
             )
 
         return None
@@ -129,4 +137,5 @@ class RSIReversalV2(BaseStrategy):
             "oversold": self.oversold,
             "overbought": self.overbought,
             "atr_period": self.atr_period,
+            "max_hold_days": self.max_hold_days,
         }

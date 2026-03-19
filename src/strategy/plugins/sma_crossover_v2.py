@@ -23,17 +23,19 @@ class SMACrossoverV2(BaseStrategy):
 
     def __init__(
         self,
-        short_period: int = 20,
-        long_period: int = 50,
+        short_period: int = 10,
+        long_period: int = 30,
         atr_period: int = 14,
         adx_period: int = 14,
-        adx_threshold: float = 25.0,
+        adx_threshold: float = 20.0,
+        max_hold_days: int = 20,
     ):
         self.short_period = short_period
         self.long_period = long_period
         self.atr_period = atr_period
         self.adx_period = adx_period
         self.adx_threshold = adx_threshold
+        self.max_hold_days = max_hold_days
 
     def generate_signals(
         self, ticker: str, df: pd.DataFrame, market_condition: dict
@@ -75,7 +77,7 @@ class SMACrossoverV2(BaseStrategy):
         # Golden cross: BUY
         if curr_above and not prev_above:
             stop_loss = current_price - 2 * atr
-            take_profit = current_price + 3 * atr
+            take_profit = current_price + 4 * atr
             return Signal(
                 ticker=ticker,
                 action="BUY",
@@ -87,6 +89,7 @@ class SMACrossoverV2(BaseStrategy):
                     f"Price={current_price:.2f}, ATR={atr:.2f}, ADX={adx:.1f}"
                 ),
                 price=round(current_price, 2),
+                max_hold_days=self.max_hold_days,
             )
 
         # Death cross: SELL
@@ -96,12 +99,13 @@ class SMACrossoverV2(BaseStrategy):
                 action="SELL",
                 confidence=self._calc_confidence(df, sma_short, sma_long, adx),
                 stop_loss=current_price + 2 * atr,
-                take_profit=current_price - 3 * atr,
+                take_profit=current_price - 4 * atr,
                 reason=(
                     f"SMA{self.short_period} crossed below SMA{self.long_period}. "
                     f"Price={current_price:.2f}, ADX={adx:.1f}"
                 ),
                 price=round(current_price, 2),
+                max_hold_days=self.max_hold_days,
             )
 
         return None
@@ -185,4 +189,5 @@ class SMACrossoverV2(BaseStrategy):
             "atr_period": self.atr_period,
             "adx_period": self.adx_period,
             "adx_threshold": self.adx_threshold,
+            "max_hold_days": self.max_hold_days,
         }

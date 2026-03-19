@@ -23,12 +23,14 @@ class BreakoutV2(BaseStrategy):
     def __init__(
         self,
         lookback: int = 20,
-        volume_mult: float = 1.5,
+        volume_mult: float = 1.3,
         atr_period: int = 14,
+        max_hold_days: int = 15,
     ):
         self.lookback = lookback
         self.volume_mult = volume_mult
         self.atr_period = atr_period
+        self.max_hold_days = max_hold_days
 
     def generate_signals(
         self, ticker: str, df: pd.DataFrame, market_condition: dict
@@ -61,8 +63,8 @@ class BreakoutV2(BaseStrategy):
 
         # Bullish breakout: price above recent high + volume confirmation
         if current_price > recent_high and current_volume > avg_volume * self.volume_mult:
-            stop_loss = recent_low
-            take_profit = current_price + 3 * atr
+            stop_loss = current_price - 2.0 * atr
+            take_profit = current_price + 4.0 * atr
             return Signal(
                 ticker=ticker,
                 action="BUY",
@@ -76,6 +78,7 @@ class BreakoutV2(BaseStrategy):
                     f"({recent_high:.2f}). Vol={current_volume/avg_volume:.1f}x avg"
                 ),
                 price=round(current_price, 2),
+                max_hold_days=self.max_hold_days,
             )
 
         # Bearish breakdown: price below recent low + volume (for exit signals)
@@ -86,13 +89,14 @@ class BreakoutV2(BaseStrategy):
                 confidence=self._calc_confidence(
                     recent_low, current_price, current_volume, avg_volume
                 ),
-                stop_loss=recent_high,
-                take_profit=current_price - 3 * atr,
+                stop_loss=current_price + 2.0 * atr,
+                take_profit=current_price - 4.0 * atr,
                 reason=(
                     f"Bearish breakdown below {self.lookback}-day low "
                     f"({recent_low:.2f}). Vol={current_volume/avg_volume:.1f}x avg"
                 ),
                 price=round(current_price, 2),
+                max_hold_days=self.max_hold_days,
             )
 
         return None
@@ -119,4 +123,5 @@ class BreakoutV2(BaseStrategy):
             "lookback": self.lookback,
             "volume_mult": self.volume_mult,
             "atr_period": self.atr_period,
+            "max_hold_days": self.max_hold_days,
         }

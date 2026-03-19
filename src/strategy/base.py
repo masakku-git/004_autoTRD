@@ -18,6 +18,7 @@ class Signal:
     take_profit: float  # price level
     reason: str  # human-readable explanation
     price: float = 0.0  # entry price at signal generation time
+    max_hold_days: int = 20  # 最大保有日数（超過で強制決済）
 
 
 class BaseStrategy(ABC):

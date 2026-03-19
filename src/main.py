@@ -70,6 +70,53 @@ def run_daily():
     buy_signals = []
     sell_signals = []
     rejected_signals = []
+    forced_exit_orders = []
+
+    # --- 強制エグジット（SL/TP/最大保有期間）チェック ---
+    for pos in account.positions:
+        ticker = pos["ticker"].replace("US.", "")
+        df = get_ohlcv(ticker)
+        if df.empty:
+            continue
+        current_price = float(df["Close"].iloc[-1])
+
+        # TradeLogからSL/TP/エントリー日を取得
+        trade_info = _get_open_trade_info(ticker)
+        if not trade_info:
+            continue
+
+        sl = trade_info.get("stop_loss", 0)
+        tp = trade_info.get("take_profit", 0)
+        max_hold = trade_info.get("max_hold_days", 20)
+        entry_date = trade_info.get("entry_date")
+
+        exit_reason = None
+        if sl > 0 and current_price <= sl:
+            exit_reason = f"ストップロス発動 (SL=${sl:.2f}, 現在=${current_price:.2f})"
+        elif tp > 0 and current_price >= tp:
+            exit_reason = f"利確ターゲット到達 (TP=${tp:.2f}, 現在=${current_price:.2f})"
+        elif entry_date and max_hold > 0:
+            holding_days = (today_jst() - entry_date).days
+            if holding_days >= max_hold:
+                exit_reason = f"最大保有期間{max_hold}日超過 ({holding_days}日経過)"
+
+        if exit_reason:
+            qty = pos["qty"] if pos.get("qty") else 0
+            if qty > 0:
+                from src.strategy.base import Signal
+                forced_signal = Signal(
+                    ticker=ticker, action="SELL", confidence=1.0,
+                    stop_loss=0, take_profit=0, reason=exit_reason,
+                    price=current_price,
+                )
+                order = place_order(forced_signal, qty)
+                close_trade_log(ticker, order, current_price)
+                forced_exit_orders.append(f"FORCED-EXIT {qty}x {ticker}: {exit_reason}")
+                logger.info(f"Forced exit: {exit_reason}")
+
+    # 強制エグジット後にアカウント情報を再取得
+    if forced_exit_orders:
+        account = get_account_info()
 
     # 保有ポジションに対して売却シグナルをチェック
     for pos in account.positions:
@@ -148,12 +195,37 @@ def run_daily():
 
     # --- Step 7: 日次レポート作成 & Slack通知 ---
     summary = _build_summary(
-        account, market_condition, candidates, executed_orders, rejected_signals
+        account, market_condition, candidates,
+        forced_exit_orders + executed_orders, rejected_signals
     )
     logger.info(summary)
     send_notification("日次トレーディングレポート", summary)
 
     logger.info("Daily run completed")
+
+
+def _get_open_trade_info(ticker: str) -> dict | None:
+    """TradeLogからオープンポジションのSL/TP/エントリー日を取得する。"""
+    from sqlalchemy import select
+
+    from src.models.trade import TradeLog
+
+    with get_session() as session:
+        trade = session.execute(
+            select(TradeLog)
+            .where(TradeLog.ticker == ticker)
+            .where(TradeLog.status == "OPEN")
+            .order_by(TradeLog.entry_date.desc())
+            .limit(1)
+        ).scalar_one_or_none()
+        if not trade:
+            return None
+        return {
+            "stop_loss": trade.stop_loss if hasattr(trade, "stop_loss") else 0,
+            "take_profit": trade.take_profit if hasattr(trade, "take_profit") else 0,
+            "max_hold_days": trade.max_hold_days if hasattr(trade, "max_hold_days") else 20,
+            "entry_date": trade.entry_date,
+        }
 
 
 def _save_portfolio_snapshot(account) -> None:
