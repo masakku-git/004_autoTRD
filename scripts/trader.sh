@@ -20,15 +20,17 @@ PROJECT_DIR="/home/trader/autoTRD"
 # UTC時刻(HH:MM)をJST(+9時間)に変換して表示する関数
 utc_to_jst() {
   local utc_time="$1"
-  local utc_h="${utc_time%%:*}"
-  local utc_m="${utc_time##*:}"
+  local utc_h=$(echo "$utc_time" | cut -d: -f1)
+  local utc_m=$(echo "$utc_time" | cut -d: -f2)
   local jst_h=$(( (10#$utc_h + 9) % 24 ))
   printf "%02d:%02d" "$jst_h" "$utc_m"
 }
 
-# タイマーファイルからUTC時刻を取得する関数
+# タイマーファイルからUTC時刻(HH:MM)を取得する関数
 get_schedule_utc() {
-  grep -oP '\d{2}:\d{2}' /etc/systemd/system/"$TIMER" 2>/dev/null || echo ""
+  local line
+  line=$(grep "OnCalendar" /etc/systemd/system/"$TIMER" 2>/dev/null) || true
+  echo "$line" | grep -oE '[0-9]{2}:[0-9]{2}' | head -1
 }
 
 case "${1}" in
@@ -49,8 +51,11 @@ case "${1}" in
     if [ -n "$UTC_TIME" ]; then
       JST_TIME=$(utc_to_jst "$UTC_TIME")
       echo "実行時刻: ${UTC_TIME} UTC / ${JST_TIME} JST (平日のみ)"
+      echo ""
+      systemctl list-timers "$TIMER" --no-pager 2>/dev/null || true
+    else
+      echo "(タイマー未登録)"
     fi
-    systemctl list-timers "$TIMER" --no-pager 2>/dev/null || echo "(タイマー未登録)"
     echo ""
     # 最終実行結果
     echo "--- Last Run ---"
