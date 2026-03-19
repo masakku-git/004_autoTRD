@@ -1,39 +1,38 @@
-"""LINE Notify通知（日次レポート・警告・エラーをLINEに送信）"""
+"""Slack Webhook通知（日次レポート・警告・エラーをSlackチャンネルに送信）"""
 import requests
 
 from config.settings import settings
 from src.utils.logger import logger
 
-LINE_NOTIFY_API = "https://notify-api.line.me/api/notify"
-
 
 def send_notification(title: str, message: str, level: str = "info") -> bool:
-    """Send notification via LINE Notify.
+    """Slack Incoming Webhookでメッセージを送信する。
 
     Args:
-        title: Notification title
-        message: Notification body
-        level: "info", "warning", or "error"
+        title: 通知タイトル
+        message: 通知本文
+        level: "info", "warning", "error"
     """
-    prefix = {"info": "", "warning": "[WARN] ", "error": "[ERROR] "}.get(level, "")
-    full_message = f"\n{prefix}{title}\n{message}"
+    # レベルに応じた絵文字プレフィックス
+    emoji = {"info": ":chart_with_upwards_trend:", "warning": ":warning:", "error": ":rotating_light:"}.get(level, "")
+    full_message = f"{emoji} *{title}*\n```\n{message}\n```"
 
-    if not settings.line_notify_token:
-        logger.info(f"Notification (no token): {full_message}")
+    # Webhook URLが未設定の場合はログ出力のみ
+    if not settings.slack_webhook_url:
+        logger.info(f"Notification (no webhook): {title}\n{message}")
         return False
 
     try:
         resp = requests.post(
-            LINE_NOTIFY_API,
-            headers={"Authorization": f"Bearer {settings.line_notify_token}"},
-            data={"message": full_message},
+            settings.slack_webhook_url,
+            json={"text": full_message},
             timeout=10,
         )
         if resp.status_code == 200:
             logger.info(f"Notification sent: {title}")
             return True
         else:
-            logger.error(f"LINE Notify failed: {resp.status_code} {resp.text}")
+            logger.error(f"Slack webhook failed: {resp.status_code} {resp.text}")
             return False
     except Exception as e:
         logger.error(f"Notification error: {e}")

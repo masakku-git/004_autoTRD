@@ -19,8 +19,8 @@ class Settings(BaseSettings):
     # データベース接続
     database_url: str = "postgresql://autotrd:password@localhost:5432/autotrd"
 
-    # LINE Notify通知トークン
-    line_notify_token: str = ""
+    # Slack Webhook通知
+    slack_webhook_url: str = ""  # Incoming Webhook URL
 
     # タイムゾーン
     tz: str = "Asia/Tokyo"
