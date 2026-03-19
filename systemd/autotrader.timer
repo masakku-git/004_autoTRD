@@ -1,0 +1,9 @@
+[Unit]
+Description=Daily trading run at 22:00 JST (13:00 UTC)
+
+[Timer]
+OnCalendar=Mon..Fri *-*-* 13:00:00 UTC
+Persistent=true
+
+[Install]
+WantedBy=timers.target
