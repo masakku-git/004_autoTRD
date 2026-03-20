@@ -10,6 +10,12 @@
 #   trader.sh time      — 実行スケジュールを表示
 #   trader.sh set-time  — 実行時刻を変更（例: trader.sh set-time 14:00）
 #   trader.sh install   — systemdにサービス・タイマーを登録
+#
+# --- 動作確認（口座不要） ---
+#   trader.sh check     — importテスト（パッケージ不足の検出）
+#   trader.sh fetch     — yfinanceデータ取得テスト
+#   trader.sh simulate  — バックテスト実行（過去データでシミュレーション）
+#   trader.sh deploy    — GitHubから最新コードを取得・セットアップ
 
 set -e
 
@@ -147,12 +153,97 @@ case "${1}" in
     echo "  $0 status   — 状態を確認"
     ;;
 
+  # ===== 動作確認コマンド（口座不要） =====
+
+  check)
+    echo "=== importテスト ==="
+    cd "$PROJECT_DIR"
+    if [ -d "venv" ]; then source venv/bin/activate; fi
+    if [ -d ".venv" ]; then source .venv/bin/activate; fi
+    python3 -c "
+import sys
+errors = []
+modules = [
+    ('numpy', 'import numpy'),
+    ('pandas', 'import pandas'),
+    ('yfinance', 'import yfinance'),
+    ('SQLAlchemy', 'import sqlalchemy'),
+    ('pydantic', 'import pydantic'),
+    ('requests', 'import requests'),
+    ('yaml', 'import yaml'),
+    ('データ取得 (fetcher)', 'from src.data.fetcher import get_ohlcv'),
+    ('スクリーニング (screener)', 'from src.data.screener import run_screening'),
+    ('戦略レジストリ (registry)', 'from src.strategy.registry import discover_strategies'),
+    ('市場判定 (selector)', 'from src.strategy.selector import assess_market_condition'),
+    ('バックテスト (engine)', 'from src.backtest.engine import run_backtest'),
+    ('リスク管理 (manager)', 'from src.risk.manager import approve_trade'),
+]
+for name, stmt in modules:
+    try:
+        exec(stmt)
+        print(f'  OK  {name}')
+    except Exception as e:
+        print(f'  NG  {name}: {e}')
+        errors.append(name)
+print()
+if errors:
+    print(f'エラー: {len(errors)}件のモジュールで問題があります')
+    sys.exit(1)
+else:
+    print('全モジュールのimport OK')
+"
+    ;;
+
+  fetch)
+    echo "=== yfinance データ取得テスト ==="
+    cd "$PROJECT_DIR"
+    if [ -d "venv" ]; then source venv/bin/activate; fi
+    if [ -d ".venv" ]; then source .venv/bin/activate; fi
+    TICKER="${2:-AAPL}"
+    echo "銘柄: ${TICKER}"
+    echo ""
+    python3 -c "
+import yfinance as yf
+ticker = '${TICKER}'
+df = yf.download(ticker, period='5d', progress=False)
+if df.empty:
+    print(f'ERROR: {ticker} のデータを取得できませんでした')
+else:
+    print(df.to_string())
+    print(f'\n取得行数: {len(df)}')
+    print('データ取得 OK')
+"
+    ;;
+
+  simulate)
+    echo "=== バックテスト（シミュレーション） ==="
+    cd "$PROJECT_DIR"
+    if [ -d "venv" ]; then source venv/bin/activate; fi
+    if [ -d ".venv" ]; then source .venv/bin/activate; fi
+    shift
+    python3 scripts/simulate.py "$@"
+    ;;
+
+  deploy)
+    echo "=== デプロイ（最新コード取得 & セットアップ） ==="
+    cd "$PROJECT_DIR"
+    echo "Pulling latest changes..."
+    git pull origin main
+    echo ""
+    echo "Installing dependencies..."
+    if [ -d "venv" ]; then source venv/bin/activate; fi
+    if [ -d ".venv" ]; then source .venv/bin/activate; fi
+    pip install -r requirements.txt --quiet
+    echo ""
+    echo "Deploy complete at $(date)"
+    ;;
+
   *)
     echo "autoTRD 管理スクリプト"
     echo ""
     echo "使い方: $0 <command>"
     echo ""
-    echo "Commands:"
+    echo "--- 運用 ---"
     echo "  status     現在の状態を表示"
     echo "  start      タイマーを開始（自動実行ON）"
     echo "  stop       タイマーを停止（自動実行OFF）"
@@ -161,6 +252,12 @@ case "${1}" in
     echo "  time       実行スケジュールを表示"
     echo "  set-time   実行時刻を変更（例: $0 set-time 14:00）"
     echo "  install    systemdにサービス・タイマーを登録"
+    echo ""
+    echo "--- 動作確認（口座不要） ---"
+    echo "  check      importテスト（パッケージ不足の検出）"
+    echo "  fetch [銘柄] yfinanceデータ取得テスト（デフォルト: AAPL）"
+    echo "  simulate   バックテスト実行（過去データでシミュレーション）"
+    echo "  deploy     GitHubから最新コード取得 & セットアップ"
     echo ""
     echo "時刻の目安 (UTC → JST):"
     echo "  13:00 UTC = 22:00 JST"
