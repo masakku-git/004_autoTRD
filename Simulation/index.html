@@ -161,7 +161,7 @@ input[type="number"] { font-family: 'SF Mono', 'Fira Code', monospace; }
   margin-top: 4px;
 }
 
-/* Strategy checkboxes */
+/* Strategy checkboxes + version select */
 .strategy-list {
   display: flex;
   flex-direction: column;
@@ -201,6 +201,19 @@ input[type="number"] { font-family: 'SF Mono', 'Fira Code', monospace; }
   padding: 2px 7px;
   border: 1px solid rgba(74,127,165,.3);
 }
+.strategy-version-select {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  color: var(--text);
+  font-size: 0.78rem;
+  font-family: 'SF Mono', 'Fira Code', monospace;
+  padding: 3px 6px;
+  cursor: pointer;
+  outline: none;
+  appearance: auto;
+}
+.strategy-version-select:focus { border-color: var(--border-focus); }
 .strategy-loading {
   font-size: 0.85rem;
   color: var(--text-sub);
@@ -396,6 +409,25 @@ pre#log-output {
 }
 .refresh-btn:hover { border-color: var(--accent); color: var(--accent-light); }
 
+/* Legacy section */
+.legacy-toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 16px;
+  border-top: 1px solid var(--border);
+  cursor: pointer;
+  user-select: none;
+  font-size: 0.82rem;
+  color: var(--text-sub);
+  transition: color .15s;
+}
+.legacy-toggle:hover { color: var(--accent-light); }
+.legacy-toggle .arrow { transition: transform .2s; display: inline-block; }
+.legacy-toggle.open .arrow { transform: rotate(90deg); }
+.legacy-content { display: none; }
+.legacy-content.open { display: block; }
+
 /* ===== Scrollbar ===== */
 ::-webkit-scrollbar { width: 6px; }
 ::-webkit-scrollbar-track { background: transparent; }
@@ -565,37 +597,59 @@ async function loadStrategies() {
   }
 }
 
-function renderStrategies(strategies) {
+function renderStrategies(strategyGroups) {
   const list = document.getElementById('strategy-list');
-  if (strategies.length === 0) {
+  if (strategyGroups.length === 0) {
     list.innerHTML = '<div class="strategy-loading">戦略ファイルが見つかりません</div>';
     return;
   }
-  list.innerHTML = strategies.map(s => {
-    const version = s.id.match(/_v(\d+)/)?.[1] || '';
-    const base    = s.id.replace(/_v\d+$/, '').replace(/_/g, ' ');
+
+  list.innerHTML = strategyGroups.map(group => {
+    const latest = group.versions[0]; // 最新バージョン（デフォルト選択）
+    const hasMultiple = group.versions.length > 1;
+    const name = group.name;
+
+    // バージョンが複数ある場合はコンボボックスを表示
+    const versionSelector = hasMultiple
+      ? `<select class="strategy-version-select" id="ver-${name}"
+               onclick="event.stopPropagation()"
+               onchange="onVersionChange('${name}')">
+           ${group.versions.map(v =>
+             `<option value="${v.id}">v${v.version}</option>`
+           ).join('')}
+         </select>`
+      : `<span class="strategy-badge">v${latest.version}</span>`;
+
     return `
-    <label class="strategy-item checked" id="item-${s.id}" onclick="toggleStrategy(this, '${s.id}')">
-      <input type="checkbox" id="chk-${s.id}" value="${s.id}" checked onclick="event.stopPropagation()">
-      <span class="strategy-label">${s.id}</span>
-      ${version ? `<span class="strategy-badge">v${version}</span>` : ''}
+    <label class="strategy-item checked" id="item-${name}"
+           onclick="toggleStrategy(this, '${name}')">
+      <input type="checkbox" id="chk-${name}" value="${latest.id}" checked
+             onclick="event.stopPropagation()">
+      <span class="strategy-label">${name}</span>
+      ${versionSelector}
     </label>`;
   }).join('');
 
   // チェックボックスの変化を監視してビジュアルを更新
-  strategies.forEach(s => {
-    const chk = document.getElementById(`chk-${s.id}`);
-    const item = document.getElementById(`item-${s.id}`);
+  strategyGroups.forEach(group => {
+    const chk = document.getElementById(`chk-${group.name}`);
+    const item = document.getElementById(`item-${group.name}`);
     chk.addEventListener('change', () => {
       item.classList.toggle('checked', chk.checked);
     });
   });
 }
 
-function toggleStrategy(label, id) {
-  const chk = document.getElementById(`chk-${id}`);
+function toggleStrategy(label, name) {
+  const chk = document.getElementById(`chk-${name}`);
   chk.checked = !chk.checked;
   label.classList.toggle('checked', chk.checked);
+}
+
+function onVersionChange(name) {
+  const sel = document.getElementById(`ver-${name}`);
+  const chk = document.getElementById(`chk-${name}`);
+  chk.value = sel.value;
 }
 
 // ===== 期間プリセット =====
@@ -755,22 +809,17 @@ function setRunning(running) {
 // ===== 結果履歴 =====
 async function loadHistory() {
   try {
-    const res     = await fetch(API('/api/results'));
-    const results = await res.json();
-    renderHistory(results);
+    const res  = await fetch(API('/api/results'));
+    const data = await res.json();
+    renderHistory(data);
   } catch (e) {
     document.getElementById('history-body').innerHTML =
       '<div class="history-empty" style="color:var(--danger);">履歴の読み込みに失敗しました</div>';
   }
 }
 
-function renderHistory(results) {
-  const body = document.getElementById('history-body');
-  if (results.length === 0) {
-    body.innerHTML = '<div class="history-empty">まだシミュレーション結果がありません</div>';
-    return;
-  }
-  const rows = results.map(r => `
+function _buildHistoryRows(results) {
+  return results.map(r => `
     <tr>
       <td><span class="period-text">${r.period || r.name}</span></td>
       <td><span class="dt-text">${r.run_at || ''}</span></td>
@@ -784,19 +833,58 @@ function renderHistory(results) {
         </div>
       </td>
     </tr>`).join('');
+}
 
-  body.innerHTML = `
+function _buildHistoryTable(results) {
+  if (results.length === 0) return '';
+  return `
     <table class="history-table">
       <thead>
-        <tr>
-          <th>期間</th>
-          <th>実行日時</th>
-          <th>サイズ</th>
-          <th>レポート</th>
-        </tr>
+        <tr><th>期間</th><th>実行日時</th><th>サイズ</th><th>レポート</th></tr>
       </thead>
-      <tbody>${rows}</tbody>
+      <tbody>${_buildHistoryRows(results)}</tbody>
     </table>`;
+}
+
+function renderHistory(data) {
+  const body = document.getElementById('history-body');
+  const current = data.current || [];
+  const legacy  = data.legacy  || [];
+
+  if (current.length === 0 && legacy.length === 0) {
+    body.innerHTML = '<div class="history-empty">まだシミュレーション結果がありません</div>';
+    return;
+  }
+
+  let html = '';
+
+  // 現在の結果
+  if (current.length > 0) {
+    html += _buildHistoryTable(current);
+  } else {
+    html += '<div class="history-empty" style="padding:16px 0;">V3以降の結果はまだありません</div>';
+  }
+
+  // V2以前の結果（折りたたみ）
+  if (legacy.length > 0) {
+    html += `
+      <div class="legacy-toggle" id="legacy-toggle" onclick="toggleLegacy()">
+        <span class="arrow">▶</span>
+        <span>V2以前の結果（${legacy.length}件）</span>
+      </div>
+      <div class="legacy-content" id="legacy-content">
+        ${_buildHistoryTable(legacy)}
+      </div>`;
+  }
+
+  body.innerHTML = html;
+}
+
+function toggleLegacy() {
+  const toggle  = document.getElementById('legacy-toggle');
+  const content = document.getElementById('legacy-content');
+  toggle.classList.toggle('open');
+  content.classList.toggle('open');
 }
 </script>
 </body>

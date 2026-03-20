@@ -50,7 +50,7 @@ RISK_PER_TRADE_PCT = 0.02
 MAX_PORTFOLIO_EXPOSURE_PCT = 0.90
 
 # Critic閾値
-APPROVAL_THRESHOLD = 0.25
+APPROVAL_THRESHOLD = 0.40
 
 
 # ===========================================================================
@@ -86,14 +86,16 @@ def fetch_all_data(tickers: list[str]) -> dict[str, pd.DataFrame]:
 def load_strategies() -> list[BaseStrategy]:
     """戦略プラグインをインスタンス化して返す"""
     strategies = []
-    # plugins ディレクトリから直接import（v2版）
-    from src.strategy.plugins.sma_crossover_v2 import SMACrossoverV2
-    from src.strategy.plugins.breakout_v2 import BreakoutV2
+    # plugins ディレクトリから直接import（v3版）
+    from src.strategy.plugins.sma_crossover_v3 import SMACrossoverV3
+    from src.strategy.plugins.breakout_v3 import BreakoutV3
     from src.strategy.plugins.rsi_reversal_v2 import RSIReversalV2
+    from src.strategy.plugins.pullback_v1 import PullbackV1
 
-    strategies.append(SMACrossoverV2())
-    strategies.append(BreakoutV2())
+    strategies.append(SMACrossoverV3())
+    strategies.append(BreakoutV3())
     strategies.append(RSIReversalV2())
+    strategies.append(PullbackV1())
     return strategies
 
 
@@ -299,6 +301,14 @@ def evaluate_signal_local(
             objections.append({"check": "low_liquidity", "penalty": 0.15,
                                "reason": f"日次出来高${daily_dollar_vol:,.0f} < $5M"})
 
+    # チェック8: 短期下落トレンド（フォーリングナイフ検出）
+    if len(df) >= 10 and signal.action == "BUY":
+        close = df["Close"]
+        pct_5d = (float(close.iloc[-1]) / float(close.iloc[-6]) - 1) * 100
+        if pct_5d < -3:
+            objections.append({"check": "short_term_downtrend", "penalty": 0.15,
+                               "reason": f"5日で{pct_5d:.1f}%下落 — フォーリングナイフ"})
+
     total_penalty = sum(o["penalty"] for o in objections)
     adjusted = max(signal.confidence - total_penalty, 0.0)
     approved = adjusted >= APPROVAL_THRESHOLD
@@ -393,7 +403,8 @@ class SimulatedPortfolio:
                "entry_reason": entry_reason,
                "stop_loss": stop_loss, "take_profit": take_profit,
                "take_profit_1": take_profit_1,
-               "max_hold_days": max_hold_days}
+               "max_hold_days": max_hold_days,
+               "highest_price": price}
         self.positions.append(pos)
         return pos
 
@@ -482,6 +493,10 @@ def simulate_one_day(
         max_hold = pos.get("max_hold_days", 20)
         holding_days = (sim_date - pos["entry_date"]).days
 
+        # 最高値トラッキング更新（トレーリングストップ用）
+        if price > pos.get("highest_price", pos["entry_price"]):
+            pos["highest_price"] = price
+
         # ストップロス発動
         if sl > 0 and price <= sl:
             trade = portfolio.sell(ticker, price, sim_date,
@@ -527,7 +542,9 @@ def simulate_one_day(
             if df is not None:
                 df_slice = df[df.index <= pd.Timestamp(sim_date)]
                 if not df_slice.empty:
-                    trade_info = {"take_profit": tp, "stop_loss": sl}
+                    trade_info = {"take_profit": tp, "stop_loss": sl,
+                                    "entry_price": pos["entry_price"],
+                                    "highest_price": pos.get("highest_price", pos["entry_price"])}
                     exit_decision = getattr(strategy, 'check_exit', lambda *a: None)(ticker, df_slice, trade_info)
                     if exit_decision is not None:
                         if exit_decision.should_exit:
@@ -1232,43 +1249,117 @@ def generate_html_report(
         max_val = max(values) * 1.005
         val_range = max_val - min_val if max_val > min_val else 1
         chart_w = 800
-        chart_h = 250
-        padding = 40
+        chart_h = 300  # 拡大: VIXバー用のスペース確保
+        padding_top = 40
+        padding_bottom = 70  # VIXバー + X軸ラベル用
+        padding_left = 45
+        padding_right = 40
+        equity_h = chart_h - padding_top - padding_bottom  # 資産カーブ描画エリア
 
+        n = len(values)
+
+        def ix(i: int) -> float:
+            return padding_left + (i / (n - 1)) * (chart_w - padding_left - padding_right)
+
+        # --- 市場トレンド背景バンド ---
+        trend_colors = {"bull": "rgba(90,160,90,0.10)", "bear": "rgba(180,70,70,0.10)", "neutral": "rgba(140,140,140,0.06)"}
+        trend_bands = ""
+        if day_reports and len(day_reports) == n:
+            band_start = 0
+            current_trend = day_reports[0].get("market_condition", {}).get("sp500_trend", "neutral")
+            for i in range(1, n):
+                trend = day_reports[i].get("market_condition", {}).get("sp500_trend", "neutral")
+                if trend != current_trend or i == n - 1:
+                    end_i = i if trend != current_trend else i
+                    x1 = ix(band_start)
+                    x2 = ix(end_i)
+                    color = trend_colors.get(current_trend, trend_colors["neutral"])
+                    trend_bands += f'<rect x="{x1:.1f}" y="{padding_top}" width="{x2 - x1:.1f}" height="{equity_h}" fill="{color}"/>'
+                    band_start = i
+                    current_trend = trend
+
+        # --- 資産カーブポイント ---
         points = []
         for i, v in enumerate(values):
-            x = padding + (i / (len(values) - 1)) * (chart_w - 2 * padding)
-            y = chart_h - padding - ((v - min_val) / val_range) * (chart_h - 2 * padding)
+            x = ix(i)
+            y = padding_top + equity_h - ((v - min_val) / val_range) * equity_h
             points.append(f"{x:.1f},{y:.1f}")
 
         polyline = " ".join(points)
-        fill_points = f"{points[0].split(',')[0]},{chart_h - padding} " + polyline + f" {points[-1].split(',')[0]},{chart_h - padding}"
+        fill_points = f"{ix(0):.1f},{padding_top + equity_h} " + polyline + f" {ix(n - 1):.1f},{padding_top + equity_h}"
 
         # Y軸ラベル
         y_labels = ""
         for i in range(5):
             val = min_val + (val_range * i / 4)
-            y = chart_h - padding - (i / 4) * (chart_h - 2 * padding)
-            y_labels += f'<text x="{padding - 5}" y="{y + 4}" text-anchor="end" class="chart-label">${val:,.0f}</text>'
-            y_labels += f'<line x1="{padding}" y1="{y}" x2="{chart_w - padding}" y2="{y}" class="chart-grid"/>'
+            y = padding_top + equity_h - (i / 4) * equity_h
+            y_labels += f'<text x="{padding_left - 5}" y="{y + 4}" text-anchor="end" class="chart-label">${val:,.0f}</text>'
+            y_labels += f'<line x1="{padding_left}" y1="{y}" x2="{chart_w - padding_right}" y2="{y}" class="chart-grid"/>'
 
         # X軸ラベル（間引き）
         x_labels = ""
-        step = max(1, len(snapshots) // 6)
-        for i in range(0, len(snapshots), step):
-            x = padding + (i / (len(values) - 1)) * (chart_w - 2 * padding)
-            x_labels += f'<text x="{x}" y="{chart_h - padding + 20}" text-anchor="middle" class="chart-label">{snapshots[i]["date"].strftime("%m/%d")}</text>'
+        step = max(1, n // 6)
+        for i in range(0, n, step):
+            x = ix(i)
+            x_labels += f'<text x="{x}" y="{padding_top + equity_h + 15}" text-anchor="middle" class="chart-label">{snapshots[i]["date"].strftime("%m/%d")}</text>'
 
         # 基準線
-        baseline_y = chart_h - padding - ((initial - min_val) / val_range) * (chart_h - 2 * padding)
+        baseline_y = padding_top + equity_h - ((initial - min_val) / val_range) * equity_h
+
+        # --- VIXバー（下部） ---
+        vix_bar_top = padding_top + equity_h + 25
+        vix_bar_h = 20
+        vix_svg = ""
+        if day_reports and len(day_reports) == n:
+            vix_values = [r.get("market_condition", {}).get("vix_level", 0) for r in day_reports]
+            max_vix = max(vix_values) if vix_values else 1
+            max_vix = max(max_vix, 1)
+
+            # VIXバーの背景
+            vix_svg += f'<rect x="{padding_left}" y="{vix_bar_top}" width="{chart_w - padding_left - padding_right}" height="{vix_bar_h}" fill="rgba(255,255,255,0.03)" rx="3"/>'
+            vix_svg += f'<text x="{padding_left - 5}" y="{vix_bar_top + vix_bar_h / 2 + 4}" text-anchor="end" class="chart-label" style="font-size:8px;">VIX</text>'
+
+            # VIXの各日を色付きバーで描画
+            bar_w = (chart_w - padding_left - padding_right) / max(n - 1, 1)
+            for i, vix in enumerate(vix_values):
+                x = ix(i) - bar_w / 2
+                h = (vix / max_vix) * vix_bar_h
+                y = vix_bar_top + vix_bar_h - h
+                if vix > 30:
+                    color = "rgba(200,70,70,0.7)"
+                elif vix > 20:
+                    color = "rgba(200,160,60,0.6)"
+                else:
+                    color = "rgba(90,140,90,0.5)"
+                vix_svg += f'<rect x="{x:.1f}" y="{y:.1f}" width="{max(bar_w * 0.8, 1):.1f}" height="{h:.1f}" fill="{color}"/>'
+
+            # VIX閾値ラベル
+            for threshold, label in [(20, "20"), (30, "30")]:
+                if threshold <= max_vix:
+                    th_y = vix_bar_top + vix_bar_h - (threshold / max_vix) * vix_bar_h
+                    vix_svg += f'<line x1="{padding_left}" y1="{th_y:.1f}" x2="{chart_w - padding_right}" y2="{th_y:.1f}" stroke="rgba(255,255,255,0.15)" stroke-width="0.5" stroke-dasharray="3,3"/>'
+                    vix_svg += f'<text x="{chart_w - padding_right + 3}" y="{th_y + 3:.1f}" class="chart-label" style="font-size:7px;">{label}</text>'
+
+        # --- トレンド凡例 ---
+        legend_y = padding_top - 8
+        legend_svg = f"""
+      <rect x="{padding_left}" y="{legend_y - 8}" width="10" height="10" fill="rgba(90,160,90,0.25)" rx="2"/>
+      <text x="{padding_left + 14}" y="{legend_y}" class="chart-label" style="font-size:8px;">強気</text>
+      <rect x="{padding_left + 40}" y="{legend_y - 8}" width="10" height="10" fill="rgba(180,70,70,0.25)" rx="2"/>
+      <text x="{padding_left + 54}" y="{legend_y}" class="chart-label" style="font-size:8px;">弱気</text>
+      <rect x="{padding_left + 80}" y="{legend_y - 8}" width="10" height="10" fill="rgba(140,140,140,0.15)" rx="2"/>
+      <text x="{padding_left + 94}" y="{legend_y}" class="chart-label" style="font-size:8px;">中立</text>"""
 
         chart_svg = f"""
-    <svg viewBox="0 0 {chart_w} {chart_h + 10}" class="equity-chart">
+    <svg viewBox="0 0 {chart_w} {chart_h}" class="equity-chart">
+      {legend_svg}
+      {trend_bands}
       {y_labels}
       {x_labels}
-      <line x1="{padding}" y1="{baseline_y}" x2="{chart_w - padding}" y2="{baseline_y}" class="chart-baseline"/>
+      <line x1="{padding_left}" y1="{baseline_y:.1f}" x2="{chart_w - padding_right}" y2="{baseline_y:.1f}" class="chart-baseline"/>
       <polygon points="{fill_points}" class="chart-fill"/>
       <polyline points="{polyline}" class="chart-line"/>
+      {vix_svg}
     </svg>"""
     else:
         chart_svg = '<div class="no-action">データが不足しています</div>'

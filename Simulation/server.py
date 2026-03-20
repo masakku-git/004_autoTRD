@@ -65,11 +65,34 @@ PORT = 8765
 
 def discover_strategy_plugins() -> list[dict]:
     """プラグインディレクトリから利用可能な戦略ファイルを探索する。
-    アンダースコア始まり（非公開）を除き、_vN.py 形式のものをすべて返す。
+    戦略名ごとにバージョンをグループ化し、最新バージョンを先頭に返す。
+
+    返り値の各要素:
+      {
+        "name": "breakout",          # 戦略名
+        "versions": [                 # 新しい順
+          {"id": "breakout_v3", "version": 3},
+          {"id": "breakout_v2", "version": 2},
+        ]
+      }
     """
+    import re
+
+    files = sorted(PLUGINS_DIR.glob("[!_]*_v*.py"))
+    groups: dict[str, list[dict]] = {}
+    for f in files:
+        stem = f.stem  # e.g. "breakout_v3"
+        m = re.match(r"^(.+)_v(\d+)$", stem)
+        if not m:
+            continue
+        name = m.group(1)
+        version = int(m.group(2))
+        groups.setdefault(name, []).append({"id": stem, "version": version})
+
     result = []
-    for f in sorted(PLUGINS_DIR.glob("[!_]*_v*.py")):
-        result.append({"id": f.stem, "label": f.stem})
+    for name in sorted(groups.keys()):
+        versions = sorted(groups[name], key=lambda v: v["version"], reverse=True)
+        result.append({"name": name, "versions": versions})
     return result
 
 
@@ -234,6 +257,13 @@ class SimHandler(BaseHTTPRequestHandler):
                 self._json(discover_strategy_plugins())
             elif path == "/api/results":
                 self._serve_results_list()
+            elif path.startswith("/result/V2以前/") or path.startswith("/result/V2%E4%BB%A5%E5%89%8D/"):
+                # V2以前サブディレクトリのファイル
+                if path.startswith("/result/V2以前/"):
+                    fname = path[len("/result/V2以前/"):]
+                else:
+                    fname = path[len("/result/V2%E4%BB%A5%E5%89%8D/"):]
+                self._serve_file(RESULT_DIR / "V2以前" / fname, "text/html")
             elif path.startswith("/result/"):
                 fname = path[len("/result/"):]
                 self._serve_file(RESULT_DIR / fname, "text/html")
@@ -334,18 +364,27 @@ class SimHandler(BaseHTTPRequestHandler):
             pass
 
     def _serve_results_list(self) -> None:
+        """現在の結果とV2以前の結果を分けて返す。"""
         RESULT_DIR.mkdir(exist_ok=True)
+        legacy_dir = RESULT_DIR / "V2以前"
+
+        current = self._collect_results(RESULT_DIR, "/result/")
+        legacy = self._collect_results(legacy_dir, "/result/V2以前/") if legacy_dir.exists() else []
+
+        self._json({"current": current, "legacy": legacy})
+
+    def _collect_results(self, directory: Path, url_prefix: str) -> list[dict]:
+        """指定ディレクトリからシミュレーション結果を収集する。"""
         sim_files = sorted(
-            RESULT_DIR.glob("*_sim.html"),
+            directory.glob("*_sim.html"),
             key=lambda f: f.stat().st_mtime,
             reverse=True,
         )
         result = []
         for f in sim_files:
             ana_name = f.name.replace("_sim.html", "_analysis.html")
-            ana_path = RESULT_DIR / ana_name
-            # ファイル名から期間を解析: YYYYMMDD_YYYYMMDD_YYYYMMDD_HHMMSS_sim.html
-            parts = f.stem.split("_")  # e.g. ['20250101', '20250630', '20250320', '214500', 'sim']
+            ana_path = directory / ana_name
+            parts = f.stem.split("_")
             period = ""
             run_dt = ""
             if len(parts) >= 4:
@@ -366,12 +405,12 @@ class SimHandler(BaseHTTPRequestHandler):
                     "name":         f.name,
                     "period":       period,
                     "run_at":       run_dt,
-                    "sim_url":      f"/result/{f.name}",
-                    "analysis_url": f"/result/{ana_name}" if ana_path.exists() else None,
+                    "sim_url":      f"{url_prefix}{f.name}",
+                    "analysis_url": f"{url_prefix}{ana_name}" if ana_path.exists() else None,
                     "size_kb":      round(f.stat().st_size / 1024, 1),
                 }
             )
-        self._json(result)
+        return result
 
     def _serve_file(self, path: Path, content_type: str) -> None:
         try:

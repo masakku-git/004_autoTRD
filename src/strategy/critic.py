@@ -20,7 +20,7 @@ from src.strategy.base import Signal
 from src.utils.logger import logger
 
 # Minimum confidence after critic review to proceed with the trade
-APPROVAL_THRESHOLD = 0.25
+APPROVAL_THRESHOLD = 0.40
 
 
 @dataclass
@@ -282,7 +282,30 @@ def check_recent_loss_on_same_ticker(  # チェック7: 同一銘柄での直近
     return objections
 
 
-def check_low_liquidity_hours(  # チェック8: 流動性不足（日次出来高$5M未満）
+def check_short_term_downtrend(  # チェック8: 短期下落トレンド（フォーリングナイフ検出）
+    signal: Signal, df: pd.DataFrame, market_condition: dict
+) -> list[Objection]:
+    """Penalize BUY when the stock's 5-day trend is clearly down."""
+    objections = []
+    if len(df) < 10 or signal.action != "BUY":
+        return objections
+
+    close = df["Close"]
+    pct_5d = (close.iloc[-1] / close.iloc[-6] - 1) * 100
+
+    if pct_5d < -3:
+        objections.append(
+            Objection(
+                check="short_term_downtrend",
+                penalty=0.15,
+                reason=f"Stock down {pct_5d:.1f}% in 5 days — "
+                f"catching a falling knife",
+            )
+        )
+    return objections
+
+
+def check_low_liquidity_hours(  # チェック9: 流動性不足（日次出来高$5M未満）
     signal: Signal, df: pd.DataFrame, market_condition: dict
 ) -> list[Objection]:
     """Warn if average volume is low for the stock's price level."""
@@ -319,6 +342,7 @@ ALL_CHECKS = [
     check_risk_reward_ratio,
     check_resistance_proximity,
     check_recent_loss_on_same_ticker,
+    check_short_term_downtrend,
     check_low_liquidity_hours,
 ]
 
