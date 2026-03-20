@@ -4,10 +4,12 @@ v1.0からの変更点:
   - ベア相場フィルター追加: S&P500が弱気トレンドの時はBUYシグナルを出さない
   - ADXフィルター追加: ADX >= 25（トレンド強度が十分な時のみ発動）
     → ADX < 25のダマシクロスによる損失を防ぐ
+  - ローソク足終値確定後のエントリー: クロス翌日の始値でエントリー
+  - EMAフォールバック: use_ema=TrueでEMA（指数移動平均）に切り替え可能
 
-ゴールデンクロス（短期SMA20が長期SMA50を上抜け）で買い、
+ゴールデンクロス（短期SMA10が長期SMA30を上抜け）で買い、
 デッドクロス（短期SMAが長期SMAを下抜け）で売り。
-ストップロスはATRの2倍、利確はATRの3倍で設定。
+ストップロスはATRの2倍、利確はATRの4倍で設定。
 """
 from __future__ import annotations
 
@@ -27,8 +29,9 @@ class SMACrossoverV2(BaseStrategy):
         long_period: int = 30,
         atr_period: int = 14,
         adx_period: int = 14,
-        adx_threshold: float = 20.0,
+        adx_threshold: float = 25.0,
         max_hold_days: int = 20,
+        use_ema: bool = False,
     ):
         self.short_period = short_period
         self.long_period = long_period
@@ -36,11 +39,13 @@ class SMACrossoverV2(BaseStrategy):
         self.adx_period = adx_period
         self.adx_threshold = adx_threshold
         self.max_hold_days = max_hold_days
+        self.use_ema = use_ema
 
     def generate_signals(
         self, ticker: str, df: pd.DataFrame, market_condition: dict
     ) -> Signal | None:
-        if len(df) < self.long_period + 2:
+        # 翌日始値エントリーのため、クロス検出に3本分の余裕が必要
+        if len(df) < self.long_period + 3:
             return None
 
         # ベア相場フィルター: S&P500が弱気トレンドの時はBUYを出さない。
@@ -50,12 +55,20 @@ class SMACrossoverV2(BaseStrategy):
             return None
 
         close = df["Close"]
-        sma_short = close.rolling(self.short_period).mean()
-        sma_long = close.rolling(self.long_period).mean()
 
-        # Current and previous crossover state
-        curr_above = sma_short.iloc[-1] > sma_long.iloc[-1]
-        prev_above = sma_short.iloc[-2] > sma_long.iloc[-2]
+        # SMA or EMA の選択（SMA10/30が機能しない場合のEMAフォールバック）
+        ma_label = "EMA" if self.use_ema else "SMA"
+        if self.use_ema:
+            ma_short = close.ewm(span=self.short_period, adjust=False).mean()
+            ma_long = close.ewm(span=self.long_period, adjust=False).mean()
+        else:
+            ma_short = close.rolling(self.short_period).mean()
+            ma_long = close.rolling(self.long_period).mean()
+
+        # ローソク足終値確定後のエントリー: 前日と前々日のクロスを検出し、
+        # 当日の始値でエントリーする（クロス翌日の始値エントリー）
+        curr_above = ma_short.iloc[-2] > ma_long.iloc[-2]   # 前日（終値確定済み）
+        prev_above = ma_short.iloc[-3] > ma_long.iloc[-3]   # 前々日
 
         # クロスが発生していない場合は早期リターン（ADX計算コストを省く）
         if curr_above == prev_above:
@@ -67,28 +80,29 @@ class SMACrossoverV2(BaseStrategy):
             return None
 
         # ADXフィルター: トレンド強度が不十分な時はシグナルを出さない。
-        # ADX < 25 はレンジ相場を示し、SMAクロスはダマシになりやすい。
+        # ADX < 25 はレンジ相場を示し、SMA/EMAクロスはダマシになりやすい。
         adx = self._calculate_adx(df)
         if pd.isna(adx) or adx < self.adx_threshold:
             return None
 
-        current_price = close.iloc[-1]
+        # エントリー価格は当日の始値（クロス翌日の始値）
+        entry_price = float(df["Open"].iloc[-1])
 
         # Golden cross: BUY
         if curr_above and not prev_above:
-            stop_loss = current_price - 2 * atr
-            take_profit = current_price + 4 * atr
+            stop_loss = entry_price - 2 * atr
+            take_profit = entry_price + 4 * atr
             return Signal(
                 ticker=ticker,
                 action="BUY",
-                confidence=self._calc_confidence(df, sma_short, sma_long, adx),
+                confidence=self._calc_confidence(df, ma_short, ma_long, adx),
                 stop_loss=round(stop_loss, 2),
                 take_profit=round(take_profit, 2),
                 reason=(
-                    f"SMA{self.short_period} crossed above SMA{self.long_period}. "
-                    f"Price={current_price:.2f}, ATR={atr:.2f}, ADX={adx:.1f}"
+                    f"{ma_label}{self.short_period} crossed above {ma_label}{self.long_period}. "
+                    f"Entry(Open)={entry_price:.2f}, ATR={atr:.2f}, ADX={adx:.1f}"
                 ),
-                price=round(current_price, 2),
+                price=round(entry_price, 2),
                 max_hold_days=self.max_hold_days,
             )
 
@@ -97,14 +111,14 @@ class SMACrossoverV2(BaseStrategy):
             return Signal(
                 ticker=ticker,
                 action="SELL",
-                confidence=self._calc_confidence(df, sma_short, sma_long, adx),
-                stop_loss=current_price + 2 * atr,
-                take_profit=current_price - 4 * atr,
+                confidence=self._calc_confidence(df, ma_short, ma_long, adx),
+                stop_loss=entry_price + 2 * atr,
+                take_profit=entry_price - 4 * atr,
                 reason=(
-                    f"SMA{self.short_period} crossed below SMA{self.long_period}. "
-                    f"Price={current_price:.2f}, ADX={adx:.1f}"
+                    f"{ma_label}{self.short_period} crossed below {ma_label}{self.long_period}. "
+                    f"Entry(Open)={entry_price:.2f}, ADX={adx:.1f}"
                 ),
-                price=round(current_price, 2),
+                price=round(entry_price, 2),
                 max_hold_days=self.max_hold_days,
             )
 
@@ -190,4 +204,5 @@ class SMACrossoverV2(BaseStrategy):
             "adx_period": self.adx_period,
             "adx_threshold": self.adx_threshold,
             "max_hold_days": self.max_hold_days,
+            "use_ema": self.use_ema,
         }

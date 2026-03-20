@@ -46,5 +46,9 @@ class TradeLog(Base):
     pnl: Mapped[Optional[float]] = mapped_column(Float, nullable=True)        # 損益（ドル）
     pnl_pct: Mapped[Optional[float]] = mapped_column(Float, nullable=True)    # 損益率（%）
     strategy_name: Mapped[str] = mapped_column(String(50))
+    stop_loss: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    take_profit: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    take_profit_1: Mapped[Optional[float]] = mapped_column(Float, nullable=True)  # 段階利確の第1ターゲット
+    max_hold_days: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, default=20)
     notes: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     status: Mapped[str] = mapped_column(String(10), default="OPEN")  # OPEN=保有中 / CLOSED=決済済み

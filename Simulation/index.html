@@ -1,0 +1,803 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Auto Trading Simulation</title>
+<style>
+/* ===== Reset & Base ===== */
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+:root {
+  --bg:          #1a1c1e;
+  --bg-card:     #22262b;
+  --bg-input:    #1e2227;
+  --border:      #2e333a;
+  --border-focus:#4a7fa5;
+  --text:        #d4cfc8;
+  --text-sub:    #8a8a8a;
+  --text-head:   #c8c0b4;
+  --accent:      #4a7fa5;
+  --accent-light:#5fa3d0;
+  --success:     #5a8a6a;
+  --danger:      #a05050;
+  --warn:        #b08040;
+  --gold:        #c8a84a;
+  --radius:      10px;
+  --shadow:      0 2px 12px rgba(0,0,0,.45);
+}
+html { font-size: 15px; }
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: 'SF Pro Text', 'Hiragino Sans', 'Meiryo', system-ui, sans-serif;
+  min-height: 100vh;
+  line-height: 1.6;
+}
+
+/* ===== Header ===== */
+.header {
+  background: linear-gradient(135deg, #1e2d3d 0%, #1a2535 50%, #1c2a38 100%);
+  border-bottom: 1px solid var(--border);
+  padding: 20px 32px 18px;
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+.header-icon {
+  width: 46px; height: 46px;
+  background: linear-gradient(135deg, #3a6080, #4a7fa5);
+  border-radius: 12px;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 22px;
+  box-shadow: 0 4px 12px rgba(74,127,165,.4);
+  flex-shrink: 0;
+}
+.header-text h1 { font-size: 1.3rem; color: var(--text-head); font-weight: 600; }
+.header-text p  { font-size: 0.82rem; color: var(--text-sub); margin-top: 2px; }
+
+/* ===== Layout ===== */
+.main {
+  max-width: 1100px;
+  margin: 0 auto;
+  padding: 28px 24px 60px;
+  display: grid;
+  grid-template-columns: 380px 1fr;
+  grid-template-rows: auto auto;
+  gap: 20px;
+}
+@media (max-width: 800px) {
+  .main { grid-template-columns: 1fr; }
+}
+
+/* ===== Card ===== */
+.card {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  overflow: hidden;
+}
+.card-header {
+  padding: 14px 20px 12px;
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.card-header .icon {
+  width: 30px; height: 30px;
+  border-radius: 8px;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 15px;
+  flex-shrink: 0;
+}
+.card-header h2 { font-size: 0.95rem; font-weight: 600; color: var(--text-head); }
+.card-body { padding: 20px; }
+
+/* ===== Form Elements ===== */
+.form-group { margin-bottom: 18px; }
+.form-group:last-child { margin-bottom: 0; }
+label {
+  display: block;
+  font-size: 0.8rem;
+  color: var(--text-sub);
+  margin-bottom: 6px;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+}
+input[type="date"], input[type="number"] {
+  width: 100%;
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  color: var(--text);
+  font-size: 0.95rem;
+  padding: 9px 12px;
+  outline: none;
+  transition: border-color .2s;
+  appearance: none;
+}
+input[type="date"]:focus, input[type="number"]:focus {
+  border-color: var(--border-focus);
+}
+input[type="number"] { font-family: 'SF Mono', 'Fira Code', monospace; }
+
+/* Date range row */
+.date-row {
+  display: grid;
+  grid-template-columns: 1fr auto 1fr;
+  align-items: center;
+  gap: 8px;
+}
+.date-sep { color: var(--text-sub); font-size: 1rem; text-align: center; }
+
+/* Presets */
+.presets {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+.preset-btn {
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  color: var(--text-sub);
+  font-size: 0.75rem;
+  padding: 4px 10px;
+  cursor: pointer;
+  transition: all .15s;
+}
+.preset-btn:hover {
+  border-color: var(--accent);
+  color: var(--accent-light);
+  background: rgba(74,127,165,.1);
+}
+
+/* Capital */
+.capital-display {
+  font-size: 0.75rem;
+  color: var(--text-sub);
+  margin-top: 4px;
+}
+
+/* Strategy checkboxes */
+.strategy-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.strategy-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 12px;
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  cursor: pointer;
+  transition: all .15s;
+  user-select: none;
+}
+.strategy-item:hover { border-color: var(--border-focus); }
+.strategy-item.checked { border-color: var(--accent); background: rgba(74,127,165,.08); }
+.strategy-item input[type="checkbox"] {
+  width: 16px; height: 16px;
+  accent-color: var(--accent);
+  cursor: pointer;
+  flex-shrink: 0;
+}
+.strategy-label {
+  font-size: 0.88rem;
+  color: var(--text);
+  font-family: 'SF Mono', 'Fira Code', monospace;
+  flex: 1;
+}
+.strategy-badge {
+  font-size: 0.68rem;
+  background: rgba(74,127,165,.18);
+  color: var(--accent-light);
+  border-radius: 4px;
+  padding: 2px 7px;
+  border: 1px solid rgba(74,127,165,.3);
+}
+.strategy-loading {
+  font-size: 0.85rem;
+  color: var(--text-sub);
+  padding: 8px 0;
+}
+
+/* Run Button */
+.run-btn {
+  width: 100%;
+  margin-top: 20px;
+  padding: 13px;
+  background: linear-gradient(135deg, #3a6080, #4a7fa5);
+  border: none;
+  border-radius: 8px;
+  color: #fff;
+  font-size: 1rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all .2s;
+  box-shadow: 0 4px 12px rgba(74,127,165,.35);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+}
+.run-btn:hover:not(:disabled) {
+  background: linear-gradient(135deg, #4a7090, #5a8fb5);
+  box-shadow: 0 6px 18px rgba(74,127,165,.5);
+  transform: translateY(-1px);
+}
+.run-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+  transform: none;
+}
+.run-btn .spinner {
+  width: 18px; height: 18px;
+  border: 2px solid rgba(255,255,255,.3);
+  border-top-color: #fff;
+  border-radius: 50%;
+  animation: spin .8s linear infinite;
+  display: none;
+}
+.run-btn.loading .spinner { display: block; }
+.run-btn.loading .btn-text { opacity: 0.8; }
+@keyframes spin { to { transform: rotate(360deg); } }
+
+/* ===== Log Panel ===== */
+.log-panel {
+  grid-column: 2;
+  grid-row: 1;
+}
+@media (max-width: 800px) { .log-panel { grid-column: 1; grid-row: 2; } }
+
+.log-body {
+  padding: 0;
+  height: 420px;
+  overflow-y: auto;
+  scroll-behavior: smooth;
+}
+.log-placeholder {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  color: var(--text-sub);
+  gap: 10px;
+  font-size: 0.88rem;
+}
+.log-placeholder .big-icon { font-size: 2.5rem; opacity: .4; }
+pre#log-output {
+  padding: 16px 20px;
+  font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', monospace;
+  font-size: 0.8rem;
+  line-height: 1.7;
+  color: var(--text);
+  white-space: pre-wrap;
+  word-break: break-all;
+  display: none;
+  min-height: 100%;
+}
+.log-line-sep    { color: #5a6a7a; }
+.log-line-ok     { color: var(--success); }
+.log-line-err    { color: var(--danger); }
+.log-line-warn   { color: var(--warn); }
+.log-line-info   { color: var(--accent-light); }
+.log-line-result { color: var(--gold); font-weight: 600; }
+
+/* Result links in log */
+.log-result-links {
+  margin: 16px 20px;
+  padding: 14px 16px;
+  background: rgba(90,138,106,.12);
+  border: 1px solid rgba(90,138,106,.35);
+  border-radius: 8px;
+  display: none;
+}
+.log-result-links h3 { font-size: 0.88rem; color: var(--success); margin-bottom: 10px; }
+.result-link-row { display: flex; gap: 10px; flex-wrap: wrap; }
+.result-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 14px;
+  border-radius: 6px;
+  font-size: 0.83rem;
+  font-weight: 500;
+  text-decoration: none;
+  transition: all .15s;
+}
+.result-link.sim {
+  background: rgba(74,127,165,.18);
+  border: 1px solid rgba(74,127,165,.4);
+  color: var(--accent-light);
+}
+.result-link.analysis {
+  background: rgba(200,168,74,.1);
+  border: 1px solid rgba(200,168,74,.35);
+  color: var(--gold);
+}
+.result-link:hover { transform: translateY(-1px); filter: brightness(1.15); }
+
+/* ===== History Panel ===== */
+.history-panel {
+  grid-column: 1 / -1;
+  grid-row: 2;
+}
+.history-empty {
+  text-align: center;
+  color: var(--text-sub);
+  font-size: 0.85rem;
+  padding: 30px 0;
+}
+.history-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.85rem;
+}
+.history-table th {
+  text-align: left;
+  padding: 10px 16px;
+  color: var(--text-sub);
+  font-weight: 500;
+  font-size: 0.78rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  border-bottom: 1px solid var(--border);
+}
+.history-table td {
+  padding: 12px 16px;
+  border-bottom: 1px solid rgba(255,255,255,.04);
+  vertical-align: middle;
+}
+.history-table tr:last-child td { border-bottom: none; }
+.history-table tr:hover td { background: rgba(255,255,255,.02); }
+.period-text { font-family: 'SF Mono', monospace; color: var(--text-head); }
+.dt-text     { color: var(--text-sub); font-size: 0.78rem; }
+.size-text   { color: var(--text-sub); font-size: 0.78rem; }
+.link-group  { display: flex; gap: 8px; }
+.tbl-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 5px 12px;
+  border-radius: 5px;
+  font-size: 0.78rem;
+  font-weight: 500;
+  text-decoration: none;
+  transition: all .15s;
+}
+.tbl-link.sim {
+  background: rgba(74,127,165,.15);
+  border: 1px solid rgba(74,127,165,.35);
+  color: var(--accent-light);
+}
+.tbl-link.analysis {
+  background: rgba(200,168,74,.08);
+  border: 1px solid rgba(200,168,74,.3);
+  color: var(--gold);
+}
+.tbl-link:hover { filter: brightness(1.2); transform: translateY(-1px); }
+.refresh-btn {
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  color: var(--text-sub);
+  font-size: 0.75rem;
+  padding: 4px 10px;
+  cursor: pointer;
+  transition: all .15s;
+  margin-left: 8px;
+}
+.refresh-btn:hover { border-color: var(--accent); color: var(--accent-light); }
+
+/* ===== Scrollbar ===== */
+::-webkit-scrollbar { width: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: #3a4050; border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: #4a5060; }
+</style>
+</head>
+<body>
+
+<!-- ===== Server Status Banner ===== -->
+<div id="server-banner" style="display:none; background:#5c1a1a; border-bottom:1px solid #8a3030;
+  padding:10px 32px; font-size:0.85rem; color:#e88; display:flex; align-items:center; gap:12px;">
+  <span style="font-size:1.1rem;">⚠️</span>
+  <span>
+    サーバーに接続できません。
+    プロジェクトルートで <code style="background:#3a1a1a;padding:2px 6px;border-radius:4px;">python3 Simulation/server.py</code>
+    を実行してから <strong>http://localhost:8765</strong> を開いてください。
+  </span>
+</div>
+
+<!-- ===== Header ===== -->
+<header class="header">
+  <div class="header-icon">📈</div>
+  <div class="header-text">
+    <h1>Auto Trading Simulation</h1>
+    <p>プログラムの変更なしにブラウザからシミュレーションを設定・実行</p>
+  </div>
+</header>
+
+<!-- ===== Main Grid ===== -->
+<div class="main">
+
+  <!-- ===== Config Panel ===== -->
+  <div class="card" style="grid-column:1; grid-row:1;">
+    <div class="card-header">
+      <div class="icon" style="background:rgba(74,127,165,.2);">⚙️</div>
+      <h2>シミュレーション設定</h2>
+    </div>
+    <div class="card-body">
+
+      <!-- 期間 -->
+      <div class="form-group">
+        <label>シミュレーション期間</label>
+        <div class="date-row">
+          <input type="date" id="start-date" value="2025-01-01">
+          <span class="date-sep">→</span>
+          <input type="date" id="end-date"   value="2025-06-30">
+        </div>
+        <div class="presets">
+          <button class="preset-btn" onclick="setPreset('2025-01-01','2025-06-30')">H1 2025</button>
+          <button class="preset-btn" onclick="setPreset('2025-07-01','2025-12-31')">H2 2025</button>
+          <button class="preset-btn" onclick="setPreset('2025-01-01','2025-12-31')">FY 2025</button>
+          <button class="preset-btn" onclick="setPreset('2024-01-01','2024-12-31')">FY 2024</button>
+          <button class="preset-btn" onclick="setPreset('2023-01-01','2023-12-31')">FY 2023</button>
+          <button class="preset-btn" onclick="setPreset('2022-01-01','2022-12-31')">FY 2022 (弱気)</button>
+          <button class="preset-btn" onclick="setLast(90)">直近3ヶ月</button>
+          <button class="preset-btn" onclick="setLast(180)">直近6ヶ月</button>
+        </div>
+      </div>
+
+      <!-- 初期資金 -->
+      <div class="form-group">
+        <label>初期資金 (USD)</label>
+        <input type="number" id="capital" value="10000" min="1000" max="1000000" step="500"
+               oninput="updateCapitalDisplay()">
+        <div class="capital-display" id="capital-display">$10,000.00</div>
+      </div>
+
+      <!-- 戦略選択 -->
+      <div class="form-group">
+        <label>使用戦略（複数選択可）</label>
+        <div class="strategy-list" id="strategy-list">
+          <div class="strategy-loading">戦略を読み込み中...</div>
+        </div>
+      </div>
+
+      <!-- 実行ボタン -->
+      <button class="run-btn" id="run-btn" onclick="runSimulation()">
+        <div class="spinner" id="spinner"></div>
+        <span class="btn-text" id="btn-text">▶ シミュレーション実行</span>
+      </button>
+
+    </div>
+  </div>
+
+  <!-- ===== Log Panel ===== -->
+  <div class="card log-panel">
+    <div class="card-header">
+      <div class="icon" style="background:rgba(90,138,106,.2);">📋</div>
+      <h2>実行ログ</h2>
+    </div>
+    <div class="log-body" id="log-body">
+      <div class="log-placeholder" id="log-placeholder">
+        <div class="big-icon">🖥️</div>
+        <div>シミュレーションを設定して実行してください</div>
+        <div style="font-size:0.78rem; opacity:.6;">結果は Simulation/Result/ に保存されます</div>
+      </div>
+      <pre id="log-output"></pre>
+    </div>
+    <div class="log-result-links" id="result-links">
+      <h3>✅ シミュレーション完了</h3>
+      <div class="result-link-row" id="result-link-row"></div>
+    </div>
+  </div>
+
+  <!-- ===== History Panel ===== -->
+  <div class="card history-panel">
+    <div class="card-header">
+      <div class="icon" style="background:rgba(200,168,74,.15);">📂</div>
+      <h2>
+        結果履歴
+        <button class="refresh-btn" onclick="loadHistory()">↻ 更新</button>
+      </h2>
+    </div>
+    <div class="card-body" style="padding:0;">
+      <div id="history-body">
+        <div class="history-empty">履歴を読み込み中...</div>
+      </div>
+    </div>
+  </div>
+
+</div><!-- /.main -->
+
+<script>
+// ===== 定数 =====
+const API = (path) => path;
+
+// ===== 初期化 =====
+document.addEventListener('DOMContentLoaded', async () => {
+  await checkServer();
+  updateCapitalDisplay();
+});
+
+// ===== サーバー接続確認 =====
+async function checkServer() {
+  try {
+    const res = await fetch('/api/health', { signal: AbortSignal.timeout(3000) });
+    if (res.ok) {
+      document.getElementById('server-banner').style.display = 'none';
+      loadStrategies();
+      loadHistory();
+    } else {
+      showServerBanner();
+    }
+  } catch (e) {
+    showServerBanner();
+  }
+}
+
+function showServerBanner() {
+  document.getElementById('server-banner').style.display = 'flex';
+  document.getElementById('strategy-list').innerHTML =
+    '<div class="strategy-loading" style="color:var(--danger);">サーバー未接続</div>';
+  document.getElementById('history-body').innerHTML =
+    '<div class="history-empty" style="color:var(--danger);">サーバー未接続</div>';
+}
+
+// ===== 戦略リストの読み込み =====
+async function loadStrategies() {
+  try {
+    const res = await fetch(API('/api/strategies'));
+    const strategies = await res.json();
+    renderStrategies(strategies);
+  } catch (e) {
+    document.getElementById('strategy-list').innerHTML =
+      '<div class="strategy-loading" style="color:var(--danger);">戦略の読み込みに失敗しました</div>';
+  }
+}
+
+function renderStrategies(strategies) {
+  const list = document.getElementById('strategy-list');
+  if (strategies.length === 0) {
+    list.innerHTML = '<div class="strategy-loading">戦略ファイルが見つかりません</div>';
+    return;
+  }
+  list.innerHTML = strategies.map(s => {
+    const version = s.id.match(/_v(\d+)/)?.[1] || '';
+    const base    = s.id.replace(/_v\d+$/, '').replace(/_/g, ' ');
+    return `
+    <label class="strategy-item checked" id="item-${s.id}" onclick="toggleStrategy(this, '${s.id}')">
+      <input type="checkbox" id="chk-${s.id}" value="${s.id}" checked onclick="event.stopPropagation()">
+      <span class="strategy-label">${s.id}</span>
+      ${version ? `<span class="strategy-badge">v${version}</span>` : ''}
+    </label>`;
+  }).join('');
+
+  // チェックボックスの変化を監視してビジュアルを更新
+  strategies.forEach(s => {
+    const chk = document.getElementById(`chk-${s.id}`);
+    const item = document.getElementById(`item-${s.id}`);
+    chk.addEventListener('change', () => {
+      item.classList.toggle('checked', chk.checked);
+    });
+  });
+}
+
+function toggleStrategy(label, id) {
+  const chk = document.getElementById(`chk-${id}`);
+  chk.checked = !chk.checked;
+  label.classList.toggle('checked', chk.checked);
+}
+
+// ===== 期間プリセット =====
+function setPreset(start, end) {
+  document.getElementById('start-date').value = start;
+  document.getElementById('end-date').value   = end;
+}
+
+function setLast(days) {
+  const today = new Date();
+  const from  = new Date(today);
+  from.setDate(today.getDate() - days);
+  document.getElementById('start-date').value = fmt(from);
+  document.getElementById('end-date').value   = fmt(today);
+}
+
+function fmt(d) {
+  return d.toISOString().split('T')[0];
+}
+
+// ===== 資金表示 =====
+function updateCapitalDisplay() {
+  const val = parseFloat(document.getElementById('capital').value) || 0;
+  document.getElementById('capital-display').textContent =
+    '$' + val.toLocaleString('en-US', { minimumFractionDigits: 2 });
+}
+
+// ===== シミュレーション実行 =====
+async function runSimulation() {
+  const start    = document.getElementById('start-date').value;
+  const end      = document.getElementById('end-date').value;
+  const capital  = parseFloat(document.getElementById('capital').value) || 10000;
+  const selected = [...document.querySelectorAll('#strategy-list input[type=checkbox]:checked')]
+                     .map(c => c.value);
+
+  if (!start || !end) { alert('期間を設定してください'); return; }
+  if (start >= end)   { alert('終了日は開始日より後を指定してください'); return; }
+  if (selected.length === 0) { alert('戦略を1つ以上選択してください'); return; }
+
+  setRunning(true);
+  clearLog();
+
+  try {
+    const res = await fetch(API('/api/run'), {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body:    JSON.stringify({ start, end, capital, strategies: selected }),
+    });
+    const data = await res.json();
+    if (data.error) { alert(data.error); setRunning(false); return; }
+    streamLog(data.job_id);
+  } catch (e) {
+    appendLog(`エラー: ${e.message}`, 'err');
+    setRunning(false);
+  }
+}
+
+// ===== SSE ログストリーム =====
+function streamLog(jobId) {
+  const es = new EventSource(API(`/api/stream/${jobId}`));
+
+  es.onmessage = (e) => {
+    appendLog(e.data);
+    autoScroll();
+  };
+
+  es.addEventListener('done', (e) => {
+    es.close();
+    setRunning(false);
+    const result = JSON.parse(e.data);
+    showResultLinks(result.sim, result.analysis);
+    loadHistory();
+    appendLog('', '');
+    appendLog('─'.repeat(50), 'sep');
+  });
+
+  es.addEventListener('error', (e) => {
+    es.close();
+    setRunning(false);
+    appendLog(`エラーが発生しました: ${e.data}`, 'err');
+  });
+
+  es.onerror = () => {
+    // 接続が切れた場合（done後の正常切断を含む）
+    es.close();
+    setRunning(false);
+  };
+}
+
+// ===== ログ表示 =====
+function clearLog() {
+  const out = document.getElementById('log-output');
+  out.textContent = '';
+  out.style.display = 'block';
+  document.getElementById('log-placeholder').style.display = 'none';
+  document.getElementById('result-links').style.display    = 'none';
+}
+
+function appendLog(text, cls = '') {
+  const out = document.getElementById('log-output');
+  const line = document.createElement('span');
+
+  // 自動着色
+  let lineClass = cls;
+  if (!lineClass) {
+    if (text.startsWith('===') || text.startsWith('─'))       lineClass = 'log-line-sep';
+    else if (text.includes('エラー') || text.includes('Error')) lineClass = 'log-line-err';
+    else if (text.includes('警告') || text.includes('Warn'))   lineClass = 'log-line-warn';
+    else if (text.includes('完了') || text.includes('成功'))   lineClass = 'log-line-ok';
+    else if (text.startsWith('  最終資産') || text.startsWith('  リターン')) lineClass = 'log-line-result';
+    else if (text.startsWith('使用戦略') || text.startsWith('シミュレーション開始')) lineClass = 'log-line-info';
+  }
+
+  if (lineClass === 'sep') { line.className = 'log-line-sep'; }
+  else if (lineClass)      { line.className = lineClass; }
+
+  line.textContent = text;
+  out.appendChild(line);
+  out.appendChild(document.createTextNode('\n'));
+}
+
+function autoScroll() {
+  const body = document.getElementById('log-body');
+  body.scrollTop = body.scrollHeight;
+}
+
+function showResultLinks(simUrl, analysisUrl) {
+  const links = document.getElementById('result-links');
+  const row   = document.getElementById('result-link-row');
+  row.innerHTML = '';
+  if (simUrl) {
+    const a = document.createElement('a');
+    a.href = simUrl; a.target = '_blank'; a.className = 'result-link sim';
+    a.innerHTML = '📊 シミュレーションレポート';
+    row.appendChild(a);
+  }
+  if (analysisUrl) {
+    const a = document.createElement('a');
+    a.href = analysisUrl; a.target = '_blank'; a.className = 'result-link analysis';
+    a.innerHTML = '🔍 分析レポート';
+    row.appendChild(a);
+  }
+  links.style.display = 'block';
+}
+
+// ===== ボタン状態 =====
+function setRunning(running) {
+  const btn     = document.getElementById('run-btn');
+  const spinner = document.getElementById('spinner');
+  const text    = document.getElementById('btn-text');
+  btn.disabled        = running;
+  spinner.style.display = running ? 'block' : 'none';
+  text.textContent      = running ? 'シミュレーション実行中...' : '▶ シミュレーション実行';
+  btn.classList.toggle('loading', running);
+}
+
+// ===== 結果履歴 =====
+async function loadHistory() {
+  try {
+    const res     = await fetch(API('/api/results'));
+    const results = await res.json();
+    renderHistory(results);
+  } catch (e) {
+    document.getElementById('history-body').innerHTML =
+      '<div class="history-empty" style="color:var(--danger);">履歴の読み込みに失敗しました</div>';
+  }
+}
+
+function renderHistory(results) {
+  const body = document.getElementById('history-body');
+  if (results.length === 0) {
+    body.innerHTML = '<div class="history-empty">まだシミュレーション結果がありません</div>';
+    return;
+  }
+  const rows = results.map(r => `
+    <tr>
+      <td><span class="period-text">${r.period || r.name}</span></td>
+      <td><span class="dt-text">${r.run_at || ''}</span></td>
+      <td><span class="size-text">${r.size_kb} KB</span></td>
+      <td>
+        <div class="link-group">
+          <a href="${r.sim_url}" target="_blank" class="tbl-link sim">📊 レポート</a>
+          ${r.analysis_url
+            ? `<a href="${r.analysis_url}" target="_blank" class="tbl-link analysis">🔍 分析</a>`
+            : ''}
+        </div>
+      </td>
+    </tr>`).join('');
+
+  body.innerHTML = `
+    <table class="history-table">
+      <thead>
+        <tr>
+          <th>期間</th>
+          <th>実行日時</th>
+          <th>サイズ</th>
+          <th>レポート</th>
+        </tr>
+      </thead>
+      <tbody>${rows}</tbody>
+    </table>`;
+}
+</script>
+</body>
+</html>

@@ -6,19 +6,10 @@ from datetime import date
 import pandas as pd
 
 from src.data.fetcher import get_ohlcv, update_price_cache_batch
+from src.data.universe_builder import get_universe
 from src.models.base import get_session
 from src.models.market import ScreeningResult
 from src.utils.logger import logger
-
-# スクリーニング対象銘柄（S&P500大型株から50銘柄を厳選）
-DEFAULT_UNIVERSE = [
-    "AAPL", "MSFT", "AMZN", "NVDA", "GOOGL", "META", "TSLA", "BRK-B",
-    "UNH", "JNJ", "V", "XOM", "JPM", "PG", "MA", "HD", "CVX", "MRK",
-    "ABBV", "LLY", "PEP", "KO", "COST", "AVGO", "WMT", "MCD", "CSCO",
-    "ACN", "TMO", "ABT", "DHR", "CRM", "NKE", "ORCL", "TXN", "AMD",
-    "PM", "UPS", "NEE", "UNP", "LOW", "MS", "GS", "BLK", "ISRG",
-    "INTC", "QCOM", "AMAT", "ADP", "SBUX",
-]
 
 # スクリーニング閾値
 MIN_AVG_VOLUME = 500_000   # 最低平均出来高
@@ -89,7 +80,7 @@ def run_screening(
     universe: list[str] | None = None, top_n: int = 15
 ) -> list[dict]:
     """Run full screening process. Returns top N candidates sorted by score."""
-    universe = universe or DEFAULT_UNIVERSE
+    universe = universe or get_universe()
     logger.info(f"Screening {len(universe)} tickers")
 
     # Update price cache for universe

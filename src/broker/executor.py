@@ -125,6 +125,10 @@ def create_trade_log(
             entry_price=order.price or 0,
             quantity=quantity,
             strategy_name=order.strategy_name,
+            stop_loss=signal.stop_loss,
+            take_profit=signal.take_profit,
+            take_profit_1=signal.take_profit_1 if signal.take_profit_1 > 0 else None,
+            max_hold_days=signal.max_hold_days,
             status="OPEN",
         )
         session.add(trade)
@@ -155,3 +159,29 @@ def close_trade_log(
             logger.info(
                 f"Trade closed: {ticker} PnL=${trade.pnl:.2f} ({trade.pnl_pct:.1f}%)"
             )
+
+
+def partial_close_trade_log(
+    ticker: str, exit_order: Order, exit_price: float, sold_qty: int
+) -> None:
+    """段階決済: 一部を売却してTradeLogを更新（CLOSEDにはしない）。"""
+    from sqlalchemy import select
+
+    with get_session() as session:
+        trade = session.execute(
+            select(TradeLog).where(
+                TradeLog.ticker == ticker, TradeLog.status == "OPEN"
+            )
+        ).scalar_one_or_none()
+
+        if trade:
+            partial_pnl = (exit_price - trade.entry_price) * sold_qty
+            note = (
+                f"段階決済: {sold_qty}株 @ ${exit_price:.2f}, "
+                f"PnL=${partial_pnl:.2f}"
+            )
+            trade.quantity -= sold_qty
+            trade.take_profit_1 = None  # TP1消費済み
+            trade.notes = f"{trade.notes or ''}\n{note}".strip()
+            session.commit()
+            logger.info(f"Partial close: {ticker} {note}")

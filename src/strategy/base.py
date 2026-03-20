@@ -18,7 +18,17 @@ class Signal:
     take_profit: float  # price level
     reason: str  # human-readable explanation
     price: float = 0.0  # entry price at signal generation time
+    take_profit_1: float = 0.0  # 段階利確の第1ターゲット（0 = 未使用）
     max_hold_days: int = 20  # 最大保有日数（超過で強制決済）
+
+
+@dataclass
+class ExitDecision:
+    """戦略固有のエグジット判定結果。"""
+
+    should_exit: bool
+    reason: str = ""
+    suppress_tp: bool = False  # True = 戦略がTP判定を管理、デフォルトTPチェックをスキップ
 
 
 class BaseStrategy(ABC):
@@ -52,6 +62,16 @@ class BaseStrategy(ABC):
             Signal if action should be taken, None otherwise.
         """
         ...
+
+    def check_exit(
+        self, ticker: str, df: pd.DataFrame, trade_info: dict
+    ) -> ExitDecision | None:
+        """戦略固有のエグジット条件をチェック。
+
+        Noneを返すとデフォルトのSL/TP/max_holdロジックが適用される。
+        ExitDecisionを返すと戦略が判定を上書きできる。
+        """
+        return None
 
     @abstractmethod
     def get_params(self) -> dict:

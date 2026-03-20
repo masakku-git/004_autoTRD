@@ -3,6 +3,8 @@
 v1.0からの変更点:
   - ベア相場フィルター追加: S&P500が弱気トレンドの時はBUYシグナルを出さない
     → 下落相場でのブレイクアウトは「フェイクアウト」になりやすい
+  - 段階利確: 2×ATRで半分決済、4×ATRで残りを決済
+  - ATRフロア: ATRに最低値（株価の2%）を設定してSLの最小幅を保証
 
 直近20日高値を出来高増加（平均の1.5倍以上）と共に上抜けたら買い。
 直近20日安値を出来高増加と共に下抜けたら売り。
@@ -61,10 +63,14 @@ class BreakoutV2(BaseStrategy):
         if pd.isna(atr):
             return None
 
+        # ATRフロア: 最低でも株価の2%を保証（低ボラ時のSL幅が狭すぎる問題を防止）
+        atr = max(atr, current_price * 0.02)
+
         # Bullish breakout: price above recent high + volume confirmation
         if current_price > recent_high and current_volume > avg_volume * self.volume_mult:
             stop_loss = current_price - 2.0 * atr
-            take_profit = current_price + 4.0 * atr
+            take_profit_1 = current_price + 2.0 * atr   # 段階利確: 半分決済
+            take_profit = current_price + 4.0 * atr      # 残り決済
             return Signal(
                 ticker=ticker,
                 action="BUY",
@@ -78,6 +84,7 @@ class BreakoutV2(BaseStrategy):
                     f"({recent_high:.2f}). Vol={current_volume/avg_volume:.1f}x avg"
                 ),
                 price=round(current_price, 2),
+                take_profit_1=round(take_profit_1, 2),
                 max_hold_days=self.max_hold_days,
             )
 
@@ -96,6 +103,7 @@ class BreakoutV2(BaseStrategy):
                     f"({recent_low:.2f}). Vol={current_volume/avg_volume:.1f}x avg"
                 ),
                 price=round(current_price, 2),
+                take_profit_1=round(current_price - 2.0 * atr, 2),
                 max_hold_days=self.max_hold_days,
             )
 

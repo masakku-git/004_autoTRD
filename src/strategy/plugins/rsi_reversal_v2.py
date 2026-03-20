@@ -6,6 +6,8 @@ v1.0からの変更点:
   - シグナル条件を強化: RSIが閾値を「クロス」した時のみ発動
     → 修正前: RSIが30以下で0.01上昇するだけで発動（弱すぎ）
     → 修正後: RSIが30を下から上に完全にクロスした1本のみ発動
+  - ベア相場定義をS&P500が200日SMA以下と明示的に判定
+  - 利確条件をRSI>50（中立回帰）との併用
 
 RSIが売られすぎ（30以下）から反発して30を上抜けたら買い。
 RSIが買われすぎ（70以上）から下落して70を下抜けたら売り。
@@ -15,7 +17,7 @@ from __future__ import annotations
 
 import pandas as pd
 
-from src.strategy.base import BaseStrategy, Signal
+from src.strategy.base import BaseStrategy, ExitDecision, Signal
 
 
 class RSIReversalV2(BaseStrategy):
@@ -43,8 +45,11 @@ class RSIReversalV2(BaseStrategy):
         if len(df) < self.rsi_period + 5:
             return None
 
-        # ベア相場フィルター: S&P500が弱気トレンドの時はBUYを出さない。
-        if market_condition.get("sp500_trend") == "bear":
+        # ベア相場フィルター: S&P500終値が200日SMAを下回っていればBUYを出さない。
+        # selector.pyのsp500_trend（SMA50+SMA200の複合判定）より早期にベア相場を検出する。
+        sp500_close = market_condition.get("sp500_close", 0)
+        sp500_sma200 = market_condition.get("sp500_sma200", 0)
+        if sp500_sma200 > 0 and sp500_close < sp500_sma200:
             return None
 
         rsi = self._calculate_rsi(df["Close"])
@@ -98,6 +103,33 @@ class RSIReversalV2(BaseStrategy):
             )
 
         return None
+
+    def check_exit(
+        self, ticker: str, df: pd.DataFrame, trade_info: dict
+    ) -> ExitDecision | None:
+        """利確条件: 価格がTP到達 かつ RSI>50（中立回帰）の時のみ決済。
+
+        RSI逆張りは「売られすぎからの回帰」を狙う戦略のため、
+        価格がTP到達してもRSIがまだ50未満なら回帰が不十分と判断して保持を継続する。
+        """
+        tp = trade_info.get("take_profit") or 0
+        if tp <= 0:
+            return None  # TP未設定 → デフォルトロジックに任せる
+
+        current_price = float(df["Close"].iloc[-1])
+        if current_price < tp:
+            return None  # TP未到達 → デフォルトのSL/max_holdチェックに任せる
+
+        # TP到達 → RSI > 50 かチェック
+        rsi = self._calculate_rsi(df["Close"])
+        current_rsi = float(rsi.iloc[-1])
+        if current_rsi > 50:
+            return ExitDecision(
+                should_exit=True,
+                reason=f"TP到達+RSI中立復帰 (TP=${tp:.2f}, RSI={current_rsi:.1f})",
+            )
+        # TP到達だがRSI<=50 → 通常のTPチェックを抑制して保持継続
+        return ExitDecision(should_exit=False, suppress_tp=True)
 
     def _calculate_rsi(self, close: pd.Series) -> pd.Series:
         """RSIをWilderのEMA（指数移動平均）で計算する。

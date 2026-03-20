@@ -32,6 +32,11 @@ def assess_market_condition() -> dict:
 
     if not sp500_df.empty:
         condition["sp500_trend"] = _assess_trend(sp500_df)
+        # RSI逆張り戦略のベア相場判定用（S&P500終値 vs 200日SMA）
+        if len(sp500_df) >= 200:
+            close = sp500_df["Close"]
+            condition["sp500_close"] = float(close.iloc[-1])
+            condition["sp500_sma200"] = float(close.rolling(200).mean().iloc[-1])
 
     if not vix_df.empty:
         condition["vix_level"] = float(vix_df["Close"].iloc[-1])

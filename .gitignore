@@ -16,3 +16,5 @@ htmlcov/
 .claude/
 doc/
 scripts/
+Simulation/Result/
+data/universe_cache.json
