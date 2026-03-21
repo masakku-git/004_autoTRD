@@ -57,15 +57,32 @@ APPROVAL_THRESHOLD = 0.40
 # yfinance データ取得（DB不要版）
 # ===========================================================================
 
-def fetch_all_data(tickers: list[str]) -> dict[str, pd.DataFrame]:
-    """yfinanceから全銘柄の過去2年分データを一括取得"""
+def fetch_all_data(
+    tickers: list[str], sim_start: date | None = None
+) -> dict[str, pd.DataFrame]:
+    """yfinanceから全銘柄のデータを一括取得。
+
+    sim_start が指定された場合、SMA200等のテクニカル指標計算に必要な
+    余裕（300営業日≒約420暦日）を加味してデータ開始日を決定する。
+    指定がなければ従来通り過去2年分を取得する。
+    """
     all_data: dict[str, pd.DataFrame] = {}
     total = len(tickers)
+
+    # データ取得開始日を決定
+    if sim_start is not None:
+        # SMA200 + 余裕100日 = 300営業日 ≒ 420暦日
+        fetch_start = (
+            datetime.combine(sim_start, datetime.min.time()) - timedelta(days=420)
+        ).strftime("%Y-%m-%d")
+        download_kwargs = {"start": fetch_start, "progress": False, "auto_adjust": False}
+    else:
+        download_kwargs = {"period": "2y", "progress": False, "auto_adjust": False}
 
     for i, ticker in enumerate(tickers):
         print(f"\r  [{i+1}/{total}] {ticker}...", end="", flush=True)
         try:
-            df = yf.download(ticker, period="2y", progress=False, auto_adjust=False)
+            df = yf.download(ticker, **download_kwargs)
             if not df.empty:
                 if isinstance(df.columns, pd.MultiIndex):
                     df.columns = df.columns.get_level_values(0)
@@ -2308,10 +2325,10 @@ def main():
     all_strategies = load_strategies()
     print(f"戦略: {[s.name for s in all_strategies]}")
 
-    # 全銘柄のデータ取得
+    # 全銘柄のデータ取得（シミュレーション開始日から逆算してデータ範囲を決定）
     all_tickers = list(set(DEFAULT_UNIVERSE + [SP500_TICKER, VIX_TICKER]))
     print(f"\n価格データを取得中... ({len(all_tickers)}銘柄)")
-    all_data = fetch_all_data(all_tickers)
+    all_data = fetch_all_data(all_tickers, sim_start=sim_dates[0])
     print(f"取得成功: {len(all_data)}銘柄")
 
     sp500_df = all_data.get(SP500_TICKER, pd.DataFrame())

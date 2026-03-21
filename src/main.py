@@ -214,7 +214,7 @@ def run_daily():
 
     # 売り注文を先に処理（資金を解放してから買いに回す）
     for signal in sell_signals:
-        approval = approve_trade(signal, account)
+        approval = approve_trade(signal, account, market_condition)
         if approval.approved:
             # Find quantity from existing position
             pos = next(
@@ -234,7 +234,7 @@ def run_daily():
     for signal in buy_signals:
         # Refresh account after sells
         account = get_account_info()
-        approval = approve_trade(signal, account)
+        approval = approve_trade(signal, account, market_condition)
         if approval.approved and approval.quantity > 0:
             order = place_order(signal, approval.quantity)
             # signal生成元の戦略名を特定してorderに設定

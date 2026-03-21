@@ -12,7 +12,7 @@ class Settings(BaseSettings):
     # トレーディング基本設定
     dry_run: bool = True                    # True: 注文を実際には送信しない
     max_positions: int = 3                  # 同時保有ポジション数の上限
-    risk_per_trade_pct: float = 0.02        # 1トレードあたりのリスク（資産の2%）
+    risk_per_trade_pct: float = 0.01        # 1トレードあたりのリスク（資産の1%）
     max_portfolio_exposure_pct: float = 0.90  # ポートフォリオ全体のエクスポージャー上限（90%）
     daily_loss_limit_pct: float = 0.03      # 日次損失上限（3%超で新規エントリー停止）
 

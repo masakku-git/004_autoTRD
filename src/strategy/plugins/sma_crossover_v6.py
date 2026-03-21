@@ -1,0 +1,299 @@
+"""SMAクロスオーバー戦略プラグイン v6.0
+
+v5.0からの変更点:
+  - ADX閾値緩和: 25 → 20（トレンド初動を捉えるため）
+    → ADX25ではトレンドが確定してからしかエントリーできず利幅を逃していた
+  - RSI決済追加: RSI < 50 でトレンド勢い喪失と判断し決済
+    → トレンドフォロー戦略として、モメンタム減衰を検知して早めに撤退
+  - max_hold_days: 20 → 60（スイングトレードとして十分な保有期間を確保）
+  - トレーリングストップの動的化: ADX強度に応じてトレール幅を調整
+    → ADX>=30: 1.5×ATR / ADX 20-30: 2.0×ATR / ADX<20: 2.5×ATR
+
+ゴールデンクロス（短期SMA10が長期SMA30を上抜け）で買い、
+デッドクロス（短期SMAが長期SMAを下抜け）で売り。
+"""
+from __future__ import annotations
+
+import pandas as pd
+
+from src.strategy.base import BaseStrategy, ExitDecision, Signal
+
+
+class SMACrossoverV6(BaseStrategy):
+    name = "sma_crossover"
+    version = "6.0"
+    target_regime = "trending"
+
+    def __init__(
+        self,
+        short_period: int = 10,
+        long_period: int = 30,
+        atr_period: int = 14,
+        adx_period: int = 14,
+        adx_threshold: float = 20.0,
+        rsi_period: int = 14,
+        rsi_exit_threshold: float = 50.0,
+        max_hold_days: int = 60,
+        use_ema: bool = False,
+    ):
+        self.short_period = short_period
+        self.long_period = long_period
+        self.atr_period = atr_period
+        self.adx_period = adx_period
+        self.adx_threshold = adx_threshold
+        self.rsi_period = rsi_period
+        self.rsi_exit_threshold = rsi_exit_threshold
+        self.max_hold_days = max_hold_days
+        self.use_ema = use_ema
+
+    def generate_signals(
+        self, ticker: str, df: pd.DataFrame, market_condition: dict
+    ) -> Signal | None:
+        # 翌日始値エントリーのため、クロス検出に3本分の余裕が必要
+        if len(df) < self.long_period + 3:
+            return None
+
+        # ベア相場フィルター
+        if market_condition.get("sp500_trend") == "bear":
+            return None
+
+        close = df["Close"]
+
+        # 個別銘柄SMA200フィルター: 下降トレンド銘柄でのBUYを防止
+        if len(df) >= 200:
+            sma200 = close.rolling(200).mean().iloc[-1]
+            if close.iloc[-1] < sma200:
+                return None
+
+        # SMA or EMA の選択
+        ma_label = "EMA" if self.use_ema else "SMA"
+        if self.use_ema:
+            ma_short = close.ewm(span=self.short_period, adjust=False).mean()
+            ma_long = close.ewm(span=self.long_period, adjust=False).mean()
+        else:
+            ma_short = close.rolling(self.short_period).mean()
+            ma_long = close.rolling(self.long_period).mean()
+
+        # ローソク足終値確定後のエントリー: 前日と前々日のクロスを検出
+        curr_above = ma_short.iloc[-2] > ma_long.iloc[-2]   # 前日（終値確定済み）
+        prev_above = ma_short.iloc[-3] > ma_long.iloc[-3]   # 前々日
+
+        # クロスが発生していない場合は早期リターン
+        if curr_above == prev_above:
+            return None
+
+        # ATR for stop-loss/take-profit sizing
+        atr = self._calculate_atr(df)
+        if pd.isna(atr):
+            return None
+
+        # ADXフィルター: トレンド初動を捉えるため閾値を20に緩和
+        adx = self._calculate_adx(df)
+        if pd.isna(adx) or adx < self.adx_threshold:
+            return None
+
+        # エントリー価格は当日の始値（クロス翌日の始値）
+        entry_price = float(df["Open"].iloc[-1])
+
+        # Golden cross: BUY
+        if curr_above and not prev_above:
+            # 最大損失キャップ: ATRベースと5%の厳しい方（高い方）を採用
+            sl_atr = entry_price - 2 * atr
+            sl_cap = entry_price * 0.95
+            stop_loss = max(sl_atr, sl_cap)
+            take_profit = entry_price + 4 * atr
+            return Signal(
+                ticker=ticker,
+                action="BUY",
+                confidence=self._calc_confidence(df, ma_short, ma_long, adx),
+                stop_loss=round(stop_loss, 2),
+                take_profit=round(take_profit, 2),
+                reason=(
+                    f"{ma_label}{self.short_period} crossed above {ma_label}{self.long_period}. "
+                    f"Entry(Open)={entry_price:.2f}, ATR={atr:.2f}, ADX={adx:.1f}"
+                ),
+                price=round(entry_price, 2),
+                max_hold_days=self.max_hold_days,
+            )
+
+        # Death cross: SELL
+        if not curr_above and prev_above:
+            return Signal(
+                ticker=ticker,
+                action="SELL",
+                confidence=self._calc_confidence(df, ma_short, ma_long, adx),
+                stop_loss=min(entry_price + 2 * atr, entry_price * 1.05),
+                take_profit=entry_price - 4 * atr,
+                reason=(
+                    f"{ma_label}{self.short_period} crossed below {ma_label}{self.long_period}. "
+                    f"Entry(Open)={entry_price:.2f}, ADX={adx:.1f}"
+                ),
+                price=round(entry_price, 2),
+                max_hold_days=self.max_hold_days,
+            )
+
+        return None
+
+    def check_exit(
+        self, ticker: str, df: pd.DataFrame, trade_info: dict
+    ) -> ExitDecision | None:
+        """段階的エグジット管理:
+        1. ブレークイーブンストップ: 含み益1ATR以上→SLをエントリー価格に引き上げ
+        2. 動的トレーリングストップ: 含み益2ATR以上→ADX強度に応じたトレール幅で追従
+        3. RSI決済: RSI < 50 でトレンド勢い喪失と判断し決済
+        """
+        if len(df) < max(self.atr_period, self.adx_period, self.rsi_period) + 5:
+            return None
+
+        atr = self._calculate_atr(df)
+        if pd.isna(atr):
+            return None
+
+        entry_price = trade_info.get("entry_price", 0)
+        highest_price = trade_info.get("highest_price", entry_price)
+        current_price = float(df["Close"].iloc[-1])
+        unrealized = highest_price - entry_price
+
+        # 段階2: 含み益2ATR以上→ADX連動の動的トレーリングストップ
+        if unrealized >= 2.0 * atr:
+            trail_mult = self._dynamic_trail_multiplier(df)
+            trailing_stop = highest_price - trail_mult * atr
+            if current_price <= trailing_stop:
+                return ExitDecision(
+                    should_exit=True,
+                    reason=(
+                        f"Dynamic trailing stop: price {current_price:.2f} "
+                        f"<= trail {trailing_stop:.2f} "
+                        f"(high {highest_price:.2f} - {trail_mult:.1f}×ATR {atr:.2f})"
+                    ),
+                )
+
+        # 段階1: 含み益1ATR以上→ブレークイーブンストップ
+        if unrealized >= atr:
+            if current_price <= entry_price:
+                return ExitDecision(
+                    should_exit=True,
+                    reason=(
+                        f"Break-even stop: price {current_price:.2f} "
+                        f"<= entry {entry_price:.2f} "
+                        f"(was up {unrealized/atr:.1f}×ATR)"
+                    ),
+                )
+
+        # RSI決済: RSI < 50 でモメンタム減衰を検知
+        # 含み益がある場合のみ適用（損失時はSL/ブレークイーブンに任せる）
+        if current_price > entry_price:
+            rsi = self._calculate_rsi(df["Close"])
+            if not pd.isna(rsi) and rsi < self.rsi_exit_threshold:
+                return ExitDecision(
+                    should_exit=True,
+                    reason=(
+                        f"RSI exit: RSI={rsi:.1f} < {self.rsi_exit_threshold} "
+                        f"(momentum fading, price={current_price:.2f})"
+                    ),
+                )
+
+        return None
+
+    def _dynamic_trail_multiplier(self, df: pd.DataFrame) -> float:
+        """ADX強度に応じてトレーリングストップ幅を動的に調整する。
+        ADX>30（強トレンド）: 1.5×ATR — 利益確保を優先
+        ADX 20-30（通常）: 2.0×ATR — 利益を伸ばす余地を確保
+        ADX<20（弱トレンド）: 2.5×ATR — ノイズによる早期退場を防止
+        """
+        adx = self._calculate_adx(df)
+        if pd.isna(adx):
+            return 2.0
+        if adx > 30:
+            return 1.5
+        if adx >= 20:
+            return 2.0
+        return 2.5
+
+    def _calculate_atr(self, df: pd.DataFrame) -> float:
+        high = df["High"]
+        low = df["Low"]
+        close = df["Close"]
+        tr1 = high - low
+        tr2 = (high - close.shift(1)).abs()
+        tr3 = (low - close.shift(1)).abs()
+        tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+        atr = tr.rolling(self.atr_period).mean()
+        return float(atr.iloc[-1])
+
+    def _calculate_adx(self, df: pd.DataFrame) -> float:
+        """ADX（平均方向性指数）をWilderのEMAで計算する。"""
+        high = df["High"]
+        low = df["Low"]
+        close = df["Close"]
+
+        up_move = high.diff()
+        down_move = -low.diff()
+
+        dm_plus = up_move.where((up_move > down_move) & (up_move > 0), 0.0)
+        dm_minus = down_move.where((down_move > up_move) & (down_move > 0), 0.0)
+
+        tr = pd.concat(
+            [high - low, (high - close.shift(1)).abs(), (low - close.shift(1)).abs()],
+            axis=1,
+        ).max(axis=1)
+        atr_s = tr.ewm(com=self.adx_period - 1, adjust=False).mean()
+
+        di_plus = 100 * dm_plus.ewm(com=self.adx_period - 1, adjust=False).mean() / atr_s
+        di_minus = 100 * dm_minus.ewm(com=self.adx_period - 1, adjust=False).mean() / atr_s
+
+        di_sum = (di_plus + di_minus).replace(0, float("nan"))
+        dx = 100 * (di_plus - di_minus).abs() / di_sum
+        adx = dx.ewm(com=self.adx_period - 1, adjust=False).mean()
+        return float(adx.iloc[-1])
+
+    def _calculate_rsi(self, close: pd.Series) -> float:
+        """RSIをWilderのEMAで計算する。"""
+        delta = close.diff()
+        gain = delta.where(delta > 0, 0.0)
+        loss = (-delta).where(delta < 0, 0.0)
+        avg_gain = gain.ewm(com=self.rsi_period - 1, adjust=False).mean()
+        avg_loss = loss.ewm(com=self.rsi_period - 1, adjust=False).mean()
+        rs = avg_gain / avg_loss.replace(0, float("nan"))
+        rsi = 100 - (100 / (1 + rs))
+        val = rsi.iloc[-1]
+        return float(val) if not pd.isna(val) else float("nan")
+
+    def _calc_confidence(
+        self,
+        df: pd.DataFrame,
+        sma_short: pd.Series,
+        sma_long: pd.Series,
+        adx: float,
+    ) -> float:
+        """信頼度: 出来高確認 + SMA200トレンド + ADX強度で算出。"""
+        confidence = 0.5
+
+        # 出来高確認: 平均の1.2倍以上なら信頼度UP
+        avg_vol = df["Volume"].rolling(20).mean().iloc[-1]
+        if df["Volume"].iloc[-1] > avg_vol * 1.2:
+            confidence += 0.1
+
+        # SMA200との整合性
+        if len(df) >= 200:
+            sma200 = df["Close"].rolling(200).mean().iloc[-1]
+            if df["Close"].iloc[-1] > sma200:
+                confidence += 0.1
+
+        # ADX強度ボーナス: ADXが高いほど信頼度UP（最大+0.2）
+        confidence += min((adx - self.adx_threshold) * 0.005, 0.2)
+
+        return min(confidence, 1.0)
+
+    def get_params(self) -> dict:
+        return {
+            "short_period": self.short_period,
+            "long_period": self.long_period,
+            "atr_period": self.atr_period,
+            "adx_period": self.adx_period,
+            "adx_threshold": self.adx_threshold,
+            "rsi_period": self.rsi_period,
+            "rsi_exit_threshold": self.rsi_exit_threshold,
+            "max_hold_days": self.max_hold_days,
+            "use_ema": self.use_ema,
+        }

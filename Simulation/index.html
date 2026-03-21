@@ -848,41 +848,67 @@ function _buildHistoryTable(results) {
 
 function renderHistory(data) {
   const body = document.getElementById('history-body');
-  const current = data.current || [];
-  const legacy  = data.legacy  || [];
+  const current   = data.current   || [];
+  const legacyV6  = data.legacy_v6 || [];
+  const legacyV3  = data.legacy_v3 || [];
+  const legacyV2  = data.legacy_v2 || [];
 
-  if (current.length === 0 && legacy.length === 0) {
+  if (current.length === 0 && legacyV6.length === 0 && legacyV3.length === 0 && legacyV2.length === 0) {
     body.innerHTML = '<div class="history-empty">まだシミュレーション結果がありません</div>';
     return;
   }
 
   let html = '';
 
-  // 現在の結果
+  // 現在の結果（V6）
   if (current.length > 0) {
     html += _buildHistoryTable(current);
   } else {
-    html += '<div class="history-empty" style="padding:16px 0;">V3以降の結果はまだありません</div>';
+    html += '<div class="history-empty" style="padding:16px 0;">V6以降の結果はまだありません</div>';
+  }
+
+  // V6以前の結果（折りたたみ）
+  if (legacyV6.length > 0) {
+    html += `
+      <div class="legacy-toggle" id="legacy-v6-toggle" onclick="toggleLegacySection('v6')">
+        <span class="arrow">▶</span>
+        <span>V6以前の結果（${legacyV6.length}件）</span>
+      </div>
+      <div class="legacy-content" id="legacy-v6-content">
+        ${_buildHistoryTable(legacyV6)}
+      </div>`;
+  }
+
+  // V3以前の結果（折りたたみ）
+  if (legacyV3.length > 0) {
+    html += `
+      <div class="legacy-toggle" id="legacy-v3-toggle" onclick="toggleLegacySection('v3')">
+        <span class="arrow">▶</span>
+        <span>V3以前の結果（${legacyV3.length}件）</span>
+      </div>
+      <div class="legacy-content" id="legacy-v3-content">
+        ${_buildHistoryTable(legacyV3)}
+      </div>`;
   }
 
   // V2以前の結果（折りたたみ）
-  if (legacy.length > 0) {
+  if (legacyV2.length > 0) {
     html += `
-      <div class="legacy-toggle" id="legacy-toggle" onclick="toggleLegacy()">
+      <div class="legacy-toggle" id="legacy-v2-toggle" onclick="toggleLegacySection('v2')">
         <span class="arrow">▶</span>
-        <span>V2以前の結果（${legacy.length}件）</span>
+        <span>V2以前の結果（${legacyV2.length}件）</span>
       </div>
-      <div class="legacy-content" id="legacy-content">
-        ${_buildHistoryTable(legacy)}
+      <div class="legacy-content" id="legacy-v2-content">
+        ${_buildHistoryTable(legacyV2)}
       </div>`;
   }
 
   body.innerHTML = html;
 }
 
-function toggleLegacy() {
-  const toggle  = document.getElementById('legacy-toggle');
-  const content = document.getElementById('legacy-content');
+function toggleLegacySection(version) {
+  const toggle  = document.getElementById(`legacy-${version}-toggle`);
+  const content = document.getElementById(`legacy-${version}-content`);
   toggle.classList.toggle('open');
   content.classList.toggle('open');
 }

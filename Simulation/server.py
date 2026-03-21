@@ -157,10 +157,10 @@ def _run_job(
             raise ValueError("戦略が選択されていません。")
         emit(f"使用戦略: {[s.name for s in strategies]}")
 
-        # --- 価格データ取得 ---
+        # --- 価格データ取得（シミュレーション開始日から逆算してデータ範囲を決定） ---
         all_tickers = list(set(DEFAULT_UNIVERSE + [SP500_TICKER, VIX_TICKER]))
         emit(f"価格データ取得中... ({len(all_tickers)} 銘柄、数十秒かかります)")
-        all_data = fetch_all_data(all_tickers)
+        all_data = fetch_all_data(all_tickers, sim_start=sim_dates[0])
         emit(f"取得完了: {len(all_data)} 銘柄")
 
         sp500_df = all_data.get(SP500_TICKER, pd.DataFrame())
@@ -264,6 +264,20 @@ class SimHandler(BaseHTTPRequestHandler):
                 else:
                     fname = path[len("/result/V2%E4%BB%A5%E5%89%8D/"):]
                 self._serve_file(RESULT_DIR / "V2以前" / fname, "text/html")
+            elif path.startswith("/result/V3以前/") or path.startswith("/result/V3%E4%BB%A5%E5%89%8D/"):
+                # V3以前サブディレクトリのファイル
+                if path.startswith("/result/V3以前/"):
+                    fname = path[len("/result/V3以前/"):]
+                else:
+                    fname = path[len("/result/V3%E4%BB%A5%E5%89%8D/"):]
+                self._serve_file(RESULT_DIR / "V3以前" / fname, "text/html")
+            elif path.startswith("/result/V6以前/") or path.startswith("/result/V6%E4%BB%A5%E5%89%8D/"):
+                # V6以前サブディレクトリのファイル
+                if path.startswith("/result/V6以前/"):
+                    fname = path[len("/result/V6以前/"):]
+                else:
+                    fname = path[len("/result/V6%E4%BB%A5%E5%89%8D/"):]
+                self._serve_file(RESULT_DIR / "V6以前" / fname, "text/html")
             elif path.startswith("/result/"):
                 fname = path[len("/result/"):]
                 self._serve_file(RESULT_DIR / fname, "text/html")
@@ -364,14 +378,18 @@ class SimHandler(BaseHTTPRequestHandler):
             pass
 
     def _serve_results_list(self) -> None:
-        """現在の結果とV2以前の結果を分けて返す。"""
+        """現在の結果と過去バージョンの結果を分けて返す。"""
         RESULT_DIR.mkdir(exist_ok=True)
-        legacy_dir = RESULT_DIR / "V2以前"
+        legacy_v2_dir = RESULT_DIR / "V2以前"
+        legacy_v3_dir = RESULT_DIR / "V3以前"
+        legacy_v6_dir = RESULT_DIR / "V6以前"
 
         current = self._collect_results(RESULT_DIR, "/result/")
-        legacy = self._collect_results(legacy_dir, "/result/V2以前/") if legacy_dir.exists() else []
+        legacy_v6 = self._collect_results(legacy_v6_dir, "/result/V6以前/") if legacy_v6_dir.exists() else []
+        legacy_v3 = self._collect_results(legacy_v3_dir, "/result/V3以前/") if legacy_v3_dir.exists() else []
+        legacy_v2 = self._collect_results(legacy_v2_dir, "/result/V2以前/") if legacy_v2_dir.exists() else []
 
-        self._json({"current": current, "legacy": legacy})
+        self._json({"current": current, "legacy_v6": legacy_v6, "legacy_v3": legacy_v3, "legacy_v2": legacy_v2})
 
     def _collect_results(self, directory: Path, url_prefix: str) -> list[dict]:
         """指定ディレクトリからシミュレーション結果を収集する。"""

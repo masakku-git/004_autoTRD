@@ -16,15 +16,50 @@ class TradeApproval:
     reason: str
 
 
+def _regime_risk_multiplier(market_condition: dict | None) -> float:
+    """市場レジームに応じてリスク量を調整する乗数を返す。
+
+    勝率が低いレジーム（ベア相場・高VIX）では投資額を自動的に縮小し、
+    良好なレジームでは通常通りのサイズでエントリーする。
+
+    Returns:
+        1.0: 通常（bull + VIX<25）
+        0.75: やや慎重（neutral or VIX 25-30）
+        0.5: 縮小（bear相場 or VIX>=30）
+    """
+    if market_condition is None:
+        return 1.0
+
+    sp500_trend = market_condition.get("sp500_trend", "neutral")
+    vix = market_condition.get("vix_level", 20.0)
+    if isinstance(vix, str):
+        vix = 20.0  # フォールバック
+
+    # ベア相場は常に半分
+    if sp500_trend == "bear":
+        return 0.5
+
+    # VIX >= 30: 高恐怖指数 → 半分
+    if vix >= 30:
+        return 0.5
+
+    # VIX 25-30 or neutral市場: やや慎重
+    if vix >= 25 or sp500_trend == "neutral":
+        return 0.75
+
+    return 1.0
+
+
 def approve_trade(
     signal: Signal,
     account: AccountInfo,
+    market_condition: dict | None = None,
 ) -> TradeApproval:
     """Evaluate whether a trade should be executed based on risk rules.
 
     Rules:
     1. Max simultaneous positions
-    2. Per-trade risk limit (2% of equity)
+    2. Per-trade risk limit (2% of equity, adjusted by market regime)
     3. Max portfolio exposure (90%)
     4. Position must have stop-loss
     5. Single position cannot exceed 40% of equity
@@ -58,10 +93,11 @@ def approve_trade(
             reason=f"Exposure limit reached (cash={account.cash:.2f}, limit={max_investment:.2f})",
         )
 
-    # Rule 4: Position sizing based on risk
-    # risk_amount = equity * risk_per_trade_pct
-    # quantity = risk_amount / (entry_price - stop_loss)
-    risk_amount = account.total_equity * settings.risk_per_trade_pct
+    # Rule 4: Position sizing based on risk (環境適応型サイジング)
+    # risk_amount = equity * risk_per_trade_pct * regime_multiplier
+    # 勝率が低いレジームでは自動的に投資額を縮小する
+    regime_mult = _regime_risk_multiplier(market_condition)
+    risk_amount = account.total_equity * settings.risk_per_trade_pct * regime_mult
     # エントリー価格はシグナル生成時の実際の現在値を使う。
     # 修正前: (stop_loss + take_profit) / 2 → SL/TPの中間値を使っていたため、
     #         戦略によってはATR倍率が非対称（例: SL=2ATR, TP=3ATR）な場合に
@@ -104,14 +140,15 @@ def approve_trade(
                 approved=False, quantity=0, reason="Insufficient cash"
             )
 
+    regime_info = f", regime_mult={regime_mult}" if regime_mult < 1.0 else ""
     logger.info(
         f"Trade approved: {signal.ticker} qty={quantity}, "
-        f"risk=${risk_amount:.2f}, est_cost=${quantity * entry_estimate:.2f}"
+        f"risk=${risk_amount:.2f}, est_cost=${quantity * entry_estimate:.2f}{regime_info}"
     )
     return TradeApproval(
         approved=True,
         quantity=quantity,
-        reason=f"Approved: {quantity} shares, risk=${risk_amount:.2f}",
+        reason=f"Approved: {quantity} shares, risk=${risk_amount:.2f}{regime_info}",
     )
 
 
