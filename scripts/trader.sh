@@ -12,6 +12,7 @@
 #   trader.sh install   — systemdにサービス・タイマーを登録
 #
 # --- 動作確認（口座不要） ---
+#   trader.sh ping      — OpenD接続確認（ログイン状態チェック）
 #   trader.sh check     — importテスト（パッケージ不足の検出）
 #   trader.sh fetch     — yfinanceデータ取得テスト
 #   trader.sh simulate  — バックテスト実行（過去データでシミュレーション）
@@ -155,6 +156,51 @@ case "${1}" in
 
   # ===== 動作確認コマンド（口座不要） =====
 
+  ping)
+    echo "=== OpenD 接続確認 ==="
+    cd "$PROJECT_DIR"
+    if [ -d "venv" ]; then source venv/bin/activate; fi
+    if [ -d ".venv" ]; then source .venv/bin/activate; fi
+    python3 -c "
+import sys, socket, time
+
+HOST = '127.0.0.1'
+PORT = 11111
+TIMEOUT = 5
+
+# Step 1: TCPポート疎通確認
+try:
+    sock = socket.create_connection((HOST, PORT), timeout=TIMEOUT)
+    sock.close()
+    print(f'  OK  TCP {HOST}:{PORT} — OpenDプロセスは応答しています')
+except Exception as e:
+    print(f'  NG  TCP {HOST}:{PORT} — 接続失敗: {e}')
+    print('      OpenDが起動しているか確認してください: sudo systemctl status opend.service')
+    sys.exit(1)
+
+# Step 2: moomoo API ログイン状態確認
+try:
+    from moomoo import OpenQuoteContext
+    ctx = OpenQuoteContext(host=HOST, port=PORT)
+    ret, data = ctx.get_global_state()
+    ctx.close()
+    if ret == 0:
+        login_status = data.get('login_status', ['unknown'])[0] if hasattr(data, 'get') else 'connected'
+        print(f'  OK  moomoo API — 接続成功 (status={login_status})')
+        print()
+        print('OpenD は正常にログイン済みです。取引システムを実行できます。')
+    else:
+        print(f'  NG  moomoo API — エラー: {data}')
+        print('      OpenDの再起動が必要な可能性があります: sudo systemctl restart opend.service')
+        sys.exit(1)
+except Exception as e:
+    print(f'  NG  moomoo API — 例外: {e}')
+    print('      OpenDがログアウト状態の可能性があります。')
+    print('      対処: sudo systemctl restart opend.service')
+    sys.exit(1)
+"
+    ;;
+
   check)
     echo "=== importテスト ==="
     cd "$PROJECT_DIR"
@@ -254,6 +300,7 @@ else:
     echo "  install    systemdにサービス・タイマーを登録"
     echo ""
     echo "--- 動作確認（口座不要） ---"
+    echo "  ping       OpenD接続確認（ログイン状態チェック）"
     echo "  check      importテスト（パッケージ不足の検出）"
     echo "  fetch [銘柄] yfinanceデータ取得テスト（デフォルト: AAPL）"
     echo "  simulate   バックテスト実行（過去データでシミュレーション）"

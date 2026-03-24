@@ -1,6 +1,8 @@
 """注文執行（moomoo APIへの発注・トレードログの記録・DRY_RUNモード対応）"""
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FuturesTimeoutError
 from datetime import datetime
 
 from config.settings import settings
@@ -61,6 +63,9 @@ def place_order(signal: Signal, quantity: int) -> Order:
         return order
 
 
+MOOMOO_TIMEOUT = 30  # seconds
+
+
 def _submit_to_moomoo(signal: Signal, quantity: int) -> str:
     """Submit order to moomoo via OpenD API. Returns broker order ID."""
     try:
@@ -77,37 +82,54 @@ def _submit_to_moomoo(signal: Signal, quantity: int) -> str:
     trd_env = TrdEnv.SIMULATE if settings.moomoo_trade_env == "SIMULATE" else TrdEnv.REAL
     side = TrdSide.BUY if signal.action == "BUY" else TrdSide.SELL
 
-    ctx = OpenSecTradeContext(
-        host=settings.moomoo_host,
-        port=settings.moomoo_port,
-        filter_trdmarket=TrdMarket.US,
-    )
-
-    try:
-        # Unlock trade (required for real trading)
-        if trd_env == TrdEnv.REAL and settings.moomoo_trade_password_md5:
-            ret, msg = ctx.unlock_trade(settings.moomoo_trade_password_md5)
-            if ret != 0:
-                raise RuntimeError(f"Failed to unlock trade: {msg}")
-
-        # Format ticker for moomoo (e.g., "AAPL" -> "US.AAPL")
-        moomoo_ticker = f"US.{signal.ticker}" if not signal.ticker.startswith("US.") else signal.ticker
-
-        ret, data = ctx.place_order(
-            price=0,  # Market order
-            qty=quantity,
-            code=moomoo_ticker,
-            trd_side=side,
-            order_type=OrderType.MARKET,
-            trd_env=trd_env,
+    def _place() -> str:
+        ctx = OpenSecTradeContext(
+            host=settings.moomoo_host,
+            port=settings.moomoo_port,
+            filter_trdmarket=TrdMarket.US,
         )
+        try:
+            if trd_env == TrdEnv.REAL and settings.moomoo_trade_password_md5:
+                ret, msg = ctx.unlock_trade(settings.moomoo_trade_password_md5)
+                if ret != 0:
+                    raise RuntimeError(f"Failed to unlock trade: {msg}")
 
-        if ret != 0:
-            raise RuntimeError(f"Place order failed: {data}")
+            moomoo_ticker = f"US.{signal.ticker}" if not signal.ticker.startswith("US.") else signal.ticker
 
-        return str(data["order_id"].iloc[0])
-    finally:
-        ctx.close()
+            ret, data = ctx.place_order(
+                price=0,
+                qty=quantity,
+                code=moomoo_ticker,
+                trd_side=side,
+                order_type=OrderType.MARKET,
+                trd_env=trd_env,
+            )
+
+            if ret != 0:
+                raise RuntimeError(f"Place order failed: {data}")
+
+            return str(data["order_id"].iloc[0])
+        finally:
+            ctx.close()
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(_place)
+        try:
+            return future.result(timeout=MOOMOO_TIMEOUT)
+        except FuturesTimeoutError:
+            err = f"発注タイムアウト（{MOOMOO_TIMEOUT}秒）{signal.action} {quantity}x {signal.ticker}"
+            logger.error(err)
+            _notify_opend_error(err)
+            raise RuntimeError(err)
+
+
+def _notify_opend_error(message: str) -> None:
+    """OpenD接続失敗時にSlack通知を送る（循環importを避けるため遅延import）"""
+    try:
+        from src.notify.notifier import send_notification
+        send_notification("OpenD接続エラー", message, level="error")
+    except Exception as notify_err:
+        logger.error(f"Slack通知送信失敗: {notify_err}")
 
 
 def create_trade_log(

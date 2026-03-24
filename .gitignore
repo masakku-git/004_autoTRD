@@ -17,3 +17,4 @@ htmlcov/
 doc/
 Simulation/Result/
 data/universe_cache.json
+chat/
