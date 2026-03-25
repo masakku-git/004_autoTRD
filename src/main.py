@@ -247,7 +247,8 @@ def run_daily():
     # --- Step 7: 日次レポート作成 & Slack通知 ---
     summary = _build_summary(
         account, market_condition, candidates,
-        forced_exit_orders + executed_orders, rejected_signals
+        forced_exit_orders + executed_orders, rejected_signals,
+        buy_count=len(buy_signals), sell_count=len(sell_signals),
     )
     logger.info(summary)
     send_notification("日次トレーディングレポート", summary)
@@ -337,34 +338,77 @@ def _get_previous_equity() -> float:
 
 
 def _build_summary(
-    account, market_condition, candidates, executed_orders, rejected_signals=None
+    account, market_condition, candidates, executed_orders, rejected_signals=None,
+    buy_count: int = 0, sell_count: int = 0,
 ) -> str:
     rejected_signals = rejected_signals or []
-    regime_ja = {"trending": "トレンド", "range": "レンジ", "volatile": "高ボラ"}.get(
-        market_condition.get("regime", ""), market_condition.get("regime", "N/A")
-    )
-    trend_ja = {"bull": "強気", "bear": "弱気", "neutral": "中立"}.get(
-        market_condition.get("sp500_trend", ""), market_condition.get("sp500_trend", "N/A")
-    )
+
+    regime_raw = market_condition.get("regime", "")
+    trend_raw = market_condition.get("sp500_trend", "")
+    vix = market_condition.get("vix_level", 0)
+
+    regime_ja = {"trending": "トレンド相場", "range": "レンジ相場", "volatile": "高ボラ相場"}.get(regime_raw, regime_raw)
+    trend_ja = {"bull": "強気(上昇)", "bear": "弱気(下落)", "neutral": "中立(横ばい)"}.get(trend_raw, trend_raw)
+
+    # 市場レジームの説明文
+    regime_desc = {
+        "trending": "明確なトレンドが出ている相場（ブレイクアウト・モメンタム戦略が有効）",
+        "range":    "方向感のない横ばい相場（逆張り・レンジ戦略が有効）",
+        "volatile": "VIX>30 の不安定な相場（新規エントリーを縮小・慎重モード）",
+    }.get(regime_raw, "")
+
     lines = [
         f"日付: {today_jst()}",
-        f"市場: {regime_ja} (S&P500: {trend_ja}, VIX: {market_condition.get('vix_level', 0):.1f})",
-        f"総資産: ${account.total_equity:.2f} | 現金: ${account.cash:.2f}",
-        f"保有ポジション: {len(account.positions)}",
-        f"スクリーニング候補: {len(candidates)}銘柄",
-        f"約定注文: {len(executed_orders)}件",
+        "",
+        "【市場環境】",
+        f"  S&P500トレンド : {trend_ja}",
+        f"  VIX           : {vix:.1f}",
+        f"  レジーム       : {regime_ja}",
+        f"  └ {regime_desc}",
+        "",
+        "【資産状況】",
+        f"  総資産        : ${account.total_equity:.2f}",
+        f"  現金          : ${account.cash:.2f}",
+        f"  保有ポジション : {len(account.positions)}件",
+        "",
+        "【シグナル診断】",
+        f"  スクリーニング通過 : {len(candidates)}銘柄（最大15銘柄）",
+        f"  BUYシグナル       : {buy_count}件",
+        f"  SELLシグナル      : {sell_count}件",
+        f"  Criticに却下      : {len(rejected_signals)}件",
+        f"  約定注文          : {len(executed_orders)}件",
     ]
+
     for order in executed_orders:
-        lines.append(f"  - {order}")
+        lines.append(f"    - {order}")
+
+    # スクリーニング通過銘柄 上位5銘柄
+    if candidates:
+        lines.append("")
+        lines.append(f"【スクリーニング候補 上位{min(5, len(candidates))}銘柄】")
+        lines.append(f"  {'銘柄':<8} {'株価':>7} {'ATR%':>6} {'相対強度':>8} {'スコア':>7}")
+        lines.append(f"  {'-'*8} {'-'*7} {'-'*6} {'-'*8} {'-'*7}")
+        for c in candidates[:5]:
+            lines.append(
+                f"  {c['ticker']:<8} "
+                f"${c['last_close']:>6.2f} "
+                f"{c['atr_pct']:>5.1f}% "
+                f"{c['relative_strength']:>+7.1f}% "
+                f"{c['score']:>7.2f}"
+            )
+
+    # Criticに却下されたシグナルの詳細
     if rejected_signals:
-        lines.append(f"批判評価で却下: {len(rejected_signals)}件")
+        lines.append("")
+        lines.append(f"【Criticに却下されたシグナル ({len(rejected_signals)}件)】")
         for signal, verdict in rejected_signals:
             top_objection = verdict.objections[0].reason if verdict.objections else "N/A"
             lines.append(
                 f"  x {signal.action} {signal.ticker} "
-                f"(信頼度 {verdict.original_confidence:.2f}->{verdict.adjusted_confidence:.2f}): "
+                f"(信頼度 {verdict.original_confidence:.2f}→{verdict.adjusted_confidence:.2f}): "
                 f"{top_objection[:60]}"
             )
+
     return "\n".join(lines)
 
 
