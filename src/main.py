@@ -211,6 +211,7 @@ def run_daily():
 
     # --- Step 6: 注文実行（リスク管理チェック後に発注） ---
     executed_orders = []
+    risk_rejected_orders = []
 
     # 売り注文を先に処理（資金を解放してから買いに回す）
     for signal in sell_signals:
@@ -243,12 +244,15 @@ def run_daily():
             executed_orders.append(
                 f"BUY {approval.quantity}x {signal.ticker}: {signal.reason[:60]}"
             )
+        else:
+            risk_rejected_orders.append((signal, approval))
 
     # --- Step 7: 日次レポート作成 & Slack通知 ---
     summary = _build_summary(
         account, market_condition, candidates,
         forced_exit_orders + executed_orders, rejected_signals,
         buy_count=len(buy_signals), sell_count=len(sell_signals),
+        risk_rejected_orders=risk_rejected_orders,
     )
     logger.info(summary)
     send_notification("日次トレーディングレポート", summary)
@@ -339,9 +343,10 @@ def _get_previous_equity() -> float:
 
 def _build_summary(
     account, market_condition, candidates, executed_orders, rejected_signals=None,
-    buy_count: int = 0, sell_count: int = 0,
+    buy_count: int = 0, sell_count: int = 0, risk_rejected_orders=None,
 ) -> str:
     rejected_signals = rejected_signals or []
+    risk_rejected_orders = risk_rejected_orders or []
 
     regime_raw = market_condition.get("regime", "")
     trend_raw = market_condition.get("sp500_trend", "")
@@ -365,6 +370,17 @@ def _build_summary(
         f"  VIX           : {vix:.1f}",
         f"  レジーム       : {regime_ja}",
         f"  └ {regime_desc}",
+    ]
+
+    # ベア相場・高VIX時の取引抑制アラート
+    if trend_raw == "bear":
+        lines.append("  ⚠ ベア相場のため全戦略がBUYシグナルを生成しません（新規買いなし）")
+    if vix >= 30:
+        lines.append(f"  ⚠ VIX={vix:.1f} (>=30) のためポジションサイズを50%縮小")
+    elif vix >= 25:
+        lines.append(f"  ⚠ VIX={vix:.1f} (>=25) のためポジションサイズを75%に縮小")
+
+    lines += [
         "",
         "【資産状況】",
         f"  総資産        : ${account.total_equity:.2f}",
@@ -376,6 +392,7 @@ def _build_summary(
         f"  BUYシグナル       : {buy_count}件",
         f"  SELLシグナル      : {sell_count}件",
         f"  Criticに却下      : {len(rejected_signals)}件",
+        f"  リスク管理で却下  : {len(risk_rejected_orders)}件",
         f"  約定注文          : {len(executed_orders)}件",
     ]
 
@@ -408,6 +425,13 @@ def _build_summary(
                 f"(信頼度 {verdict.original_confidence:.2f}→{verdict.adjusted_confidence:.2f}): "
                 f"{top_objection[:60]}"
             )
+
+    # リスク管理に却下されたシグナルの詳細
+    if risk_rejected_orders:
+        lines.append("")
+        lines.append(f"【リスク管理に却下されたシグナル ({len(risk_rejected_orders)}件)】")
+        for signal, approval in risk_rejected_orders:
+            lines.append(f"  x BUY {signal.ticker}: {approval.reason[:70]}")
 
     return "\n".join(lines)
 
