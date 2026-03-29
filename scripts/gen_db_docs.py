@@ -152,37 +152,45 @@ def gen_tsv(out_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 # テーブルの配置（x, y）※ピクセル単位
+#   左列: orders / trade_log（FK関係あり）
+#   中列: portfolio_snapshots / market_conditions（独立）
+#   右列: screening_results / strategy_metadata / backtest_results（FK関係あり）
 TABLE_POSITIONS = {
-    "orders":              (80,  160),
-    "trade_log":           (80,  680),
-    "portfolio_snapshots": (780, 160),
-    "market_conditions":   (780, 680),
-    "screening_results":   (1480, 160),
-    "strategy_metadata":   (1480, 560),
-    "backtest_results":    (1480, 1000),
+    "orders":              (80,   160),
+    "trade_log":           (80,  1020),
+    "portfolio_snapshots": (700,  160),
+    "market_conditions":   (700,  900),
+    "screening_results":   (1320, 160),
+    "strategy_metadata":   (2100, 160),
+    "backtest_results":    (2100, 980),
 }
 
 # 色設定
-COLOR_BG         = (250, 250, 252)
-COLOR_TABLE_HDR  = (41,  98,  255)   # ヘッダー背景（青）
-COLOR_TABLE_HDR2 = (70, 130, 255)    # サブヘッダー
+COLOR_BG         = (245, 247, 252)
+COLOR_TABLE_HDR  = (26,  70,  140)   # ヘッダー背景（ダークブルー）
+COLOR_TABLE_HDR2 = (55, 110, 200)    # サブヘッダー（ミディアムブルー）
 COLOR_TABLE_BODY = (255, 255, 255)
-COLOR_TABLE_ALT  = (245, 247, 255)   # 交互行
-COLOR_BORDER     = (180, 190, 220)
+COLOR_TABLE_ALT  = (240, 244, 255)   # 交互行（薄青）
+COLOR_BORDER     = (160, 180, 220)
 COLOR_TEXT_HDR   = (255, 255, 255)
-COLOR_TEXT_BODY  = (30,  30,  50)
-COLOR_TEXT_KEY   = (200, 50,  50)    # PK/FK強調
-COLOR_FK_LINE    = (80, 160, 80)
-COLOR_SHADOW     = (210, 215, 230)
+COLOR_TEXT_BODY  = (25,  30,  55)
+COLOR_TEXT_PK    = (180,  30,  30)   # PK強調（赤）
+COLOR_TEXT_FK    = (180,  80,   0)   # FK強調（オレンジ）
+COLOR_FK_LINE    = (40,  150,  40)   # FK矢印（緑）
+COLOR_SHADOW     = (200, 205, 220)
+COLOR_GRID       = (210, 218, 235)
 
-COL_WIDTHS = [160, 100, 50, 55]  # カラム名, 型, KEY, NULL
-ROW_H      = 22
-HDR_H      = 40
-FONT_SIZE  = 13
-FONT_SIZE_HDR = 15
+COL_WIDTHS  = [230, 155, 65, 65]   # カラム名, 型, KEY, NULL
+ROW_H       = 36
+HDR_H       = 70
+FONT_SIZE   = 20
+FONT_SIZE_HDR = 22
+FONT_SIZE_TITLE = 40
 
-IMG_W = 2200
-IMG_H = 1500
+TABLE_W = sum(COL_WIDTHS) + 12     # 約 527px
+
+IMG_W = 3000
+IMG_H = 2100
 
 
 def _load_font(size: int):
@@ -203,136 +211,235 @@ def _load_font(size: int):
 
 
 def _table_height(tname: str) -> int:
-    return HDR_H + len(TABLES[tname]["columns"]) * ROW_H + 4
+    # ヘッダー + サブヘッダー行 + データ行
+    return HDR_H + ROW_H + len(TABLES[tname]["columns"]) * ROW_H + 6
 
 
-def _table_width() -> int:
-    return sum(COL_WIDTHS) + 8
+def _rounded_rect(draw: ImageDraw.Draw, x0, y0, x1, y1, radius, fill=None, outline=None, width=1):
+    """角丸矩形を描画する。"""
+    draw.rectangle([x0 + radius, y0, x1 - radius, y1], fill=fill)
+    draw.rectangle([x0, y0 + radius, x1, y1 - radius], fill=fill)
+    draw.ellipse([x0, y0, x0 + radius*2, y0 + radius*2], fill=fill)
+    draw.ellipse([x1 - radius*2, y0, x1, y0 + radius*2], fill=fill)
+    draw.ellipse([x0, y1 - radius*2, x0 + radius*2, y1], fill=fill)
+    draw.ellipse([x1 - radius*2, y1 - radius*2, x1, y1], fill=fill)
+    if outline:
+        draw.arc([x0, y0, x0+radius*2, y0+radius*2], 180, 270, fill=outline, width=width)
+        draw.arc([x1-radius*2, y0, x1, y0+radius*2], 270, 360, fill=outline, width=width)
+        draw.arc([x0, y1-radius*2, x0+radius*2, y1], 90, 180, fill=outline, width=width)
+        draw.arc([x1-radius*2, y1-radius*2, x1, y1], 0, 90, fill=outline, width=width)
+        draw.line([x0+radius, y0, x1-radius, y0], fill=outline, width=width)
+        draw.line([x0+radius, y1, x1-radius, y1], fill=outline, width=width)
+        draw.line([x0, y0+radius, x0, y1-radius], fill=outline, width=width)
+        draw.line([x1, y0+radius, x1, y1-radius], fill=outline, width=width)
 
 
 def _draw_table(draw: ImageDraw.Draw, x: int, y: int, tname: str,
-                font, font_bold) -> dict:
+                font, font_bold, font_small) -> dict:
     """テーブルボックスを描画し、各カラムの中心Y座標を返す。"""
-    tw = _table_width()
+    tw = TABLE_W
     th = _table_height(tname)
 
-    # 影
-    draw.rectangle([x+4, y+4, x+tw+4, y+th+4], fill=COLOR_SHADOW)
+    # ドロップシャドウ
+    shadow_offset = 6
+    draw.rectangle(
+        [x + shadow_offset, y + shadow_offset, x + tw + shadow_offset, y + th + shadow_offset],
+        fill=COLOR_SHADOW,
+    )
 
-    # ヘッダー
-    draw.rectangle([x, y, x+tw, y+HDR_H], fill=COLOR_TABLE_HDR)
-    label = TABLES[tname]["label"]
-    lines = label.split("\n")
-    ly = y + 4
-    for line in lines:
-        draw.text((x + tw//2, ly), line, fill=COLOR_TEXT_HDR, font=font_bold, anchor="mt")
-        ly += FONT_SIZE_HDR + 2
+    # テーブル本体背景
+    draw.rectangle([x, y, x + tw, y + th], fill=COLOR_TABLE_BODY)
+
+    # ヘッダー（角丸）
+    _rounded_rect(draw, x, y, x + tw, y + HDR_H, radius=8, fill=COLOR_TABLE_HDR)
+    # 下半分を四角で上書き（角丸は上だけ）
+    draw.rectangle([x, y + HDR_H // 2, x + tw, y + HDR_H], fill=COLOR_TABLE_HDR)
+
+    label_lines = TABLES[tname]["label"].split("\n")
+    # テーブル名（1行目）
+    draw.text(
+        (x + tw // 2, y + 8),
+        label_lines[0],
+        fill=COLOR_TEXT_HDR,
+        font=font_bold,
+        anchor="mt",
+    )
+    # サブタイトル（2行目）
+    if len(label_lines) > 1:
+        draw.text(
+            (x + tw // 2, y + 8 + FONT_SIZE_HDR + 4),
+            label_lines[1],
+            fill=(200, 220, 255),
+            font=font_small,
+            anchor="mt",
+        )
 
     # カラムヘッダー行
     sub_y = y + HDR_H
-    draw.rectangle([x, sub_y, x+tw, sub_y+ROW_H], fill=COLOR_TABLE_HDR2)
+    draw.rectangle([x, sub_y, x + tw, sub_y + ROW_H], fill=COLOR_TABLE_HDR2)
     headers = ["カラム名", "型", "KEY", "NULL"]
-    cx = x + 4
+    cx = x + 6
     for i, h in enumerate(headers):
-        draw.text((cx + 2, sub_y + 3), h, fill=COLOR_TEXT_HDR, font=font)
+        draw.text((cx + 3, sub_y + 6), h, fill=COLOR_TEXT_HDR, font=font_small)
         cx += COL_WIDTHS[i]
 
     # データ行
-    col_centers = {}  # カラム名→中心Y
+    col_centers = {}
     for ri, col in enumerate(TABLES[tname]["columns"]):
         col_name, col_type, key, nullable, _ = col
         ry = sub_y + ROW_H + ri * ROW_H
         bg = COLOR_TABLE_BODY if ri % 2 == 0 else COLOR_TABLE_ALT
-        draw.rectangle([x, ry, x+tw, ry+ROW_H], fill=bg)
+        draw.rectangle([x, ry, x + tw, ry + ROW_H], fill=bg)
 
-        cx = x + 4
-        values = [col_name, col_type, key, nullable]
-        for ci, val in enumerate(values):
-            color = COLOR_TEXT_KEY if (ci == 2 and val in ("PK","FK")) else COLOR_TEXT_BODY
-            draw.text((cx + 2, ry + 3), val, fill=color, font=font)
+        # グリッド線（列区切り）
+        cx = x + 6
+        for ci, val in enumerate([col_name, col_type, key, nullable]):
+            if ci == 2 and val == "PK":
+                color = COLOR_TEXT_PK
+            elif ci == 2 and val == "FK":
+                color = COLOR_TEXT_FK
+            else:
+                color = COLOR_TEXT_BODY
+            draw.text((cx + 3, ry + 6), val, fill=color, font=font)
             cx += COL_WIDTHS[ci]
 
         col_centers[col_name] = ry + ROW_H // 2
 
     # 外枠
-    draw.rectangle([x, y, x+tw, y+th], outline=COLOR_BORDER, width=1)
+    draw.rectangle([x, y, x + tw, y + th], outline=COLOR_BORDER, width=2)
     # 行の区切り線
-    for ri in range(len(TABLES[tname]["columns"]) + 1):
+    for ri in range(len(TABLES[tname]["columns"]) + 2):
         ry = sub_y + ri * ROW_H
-        draw.line([x, ry, x+tw, ry], fill=COLOR_BORDER, width=1)
+        draw.line([x + 1, ry, x + tw - 1, ry], fill=COLOR_GRID, width=1)
+    # 列の区切り線
+    cx = x + 6
+    for w in COL_WIDTHS[:-1]:
+        cx += w
+        draw.line([cx, sub_y, cx, y + th], fill=COLOR_GRID, width=1)
 
     return col_centers
 
 
-def _midpoint(p1, p2):
-    return ((p1[0]+p2[0])//2, (p1[1]+p2[1])//2)
+def _draw_fk_arrow(draw: ImageDraw.Draw, x1, y1, x2, y2, label: str,
+                   color, font, offset_x: int = 0):
+    """L字型の FK 矢印を描画する。offset_x で複数矢印の重なりを避ける。"""
+    arrow_size = 9
+    line_w = 2
 
+    # 折れ点のX座標
+    mid_x = (x1 + x2) // 2 + offset_x
 
-def _draw_arrow(draw: ImageDraw.Draw, x1, y1, x2, y2, color, font):
-    """直角折れ線の矢印を描画する。"""
-    mx = (x1 + x2) // 2
-    pts = [(x1, y1), (mx, y1), (mx, y2), (x2, y2)]
-    draw.line(pts, fill=color, width=2)
-    # 矢印の先端
-    dx = x2 - mx
-    arrow_size = 7
-    if dx >= 0:
-        draw.polygon([(x2, y2), (x2-arrow_size, y2-4), (x2-arrow_size, y2+4)], fill=color)
+    pts = [(x1, y1), (mid_x, y1), (mid_x, y2), (x2, y2)]
+    draw.line(pts, fill=color, width=line_w)
+
+    # 矢印頭
+    if x2 >= mid_x:
+        draw.polygon(
+            [(x2, y2), (x2 - arrow_size, y2 - 4), (x2 - arrow_size, y2 + 4)],
+            fill=color,
+        )
     else:
-        draw.polygon([(x2, y2), (x2+arrow_size, y2-4), (x2+arrow_size, y2+4)], fill=color)
+        draw.polygon(
+            [(x2, y2), (x2 + arrow_size, y2 - 4), (x2 + arrow_size, y2 + 4)],
+            fill=color,
+        )
+
+    # ラベル（中点付近）
+    lx = mid_x + 4
+    ly = (y1 + y2) // 2 - FONT_SIZE // 2 - 2
+    # ラベル背景
+    bbox_w = len(label) * (FONT_SIZE - 4)
+    draw.rectangle(
+        [lx - 2, ly - 2, lx + bbox_w + 4, ly + FONT_SIZE + 2],
+        fill=(255, 255, 240),
+        outline=color,
+        width=1,
+    )
+    draw.text((lx, ly), label, fill=color, font=font)
 
 
 def gen_er_image(out_path: Path) -> None:
     img = Image.new("RGB", (IMG_W, IMG_H), COLOR_BG)
     draw = ImageDraw.Draw(img)
 
-    font      = _load_font(FONT_SIZE)
-    font_bold = _load_font(FONT_SIZE_HDR)
+    font_title = _load_font(FONT_SIZE_TITLE)
+    font_hdr   = _load_font(FONT_SIZE_HDR)
+    font_body  = _load_font(FONT_SIZE)
+    font_small = _load_font(FONT_SIZE - 2)
 
-    # タイトル
-    draw.text((IMG_W//2, 24), "autoTRD — ER図", fill=(30, 30, 80),
-              font=_load_font(28), anchor="mt")
+    # ── タイトル ────────────────────────────────────────────────────────
+    draw.text(
+        (IMG_W // 2, 30),
+        "autoTRD  —  ER 図",
+        fill=COLOR_TABLE_HDR,
+        font=font_title,
+        anchor="mt",
+    )
+    draw.text(
+        (IMG_W // 2, 30 + FONT_SIZE_TITLE + 6),
+        "Database Entity-Relationship Diagram",
+        fill=(100, 120, 170),
+        font=font_small,
+        anchor="mt",
+    )
+    # タイトル下線
+    draw.line(
+        [60, 30 + FONT_SIZE_TITLE + 28, IMG_W - 60, 30 + FONT_SIZE_TITLE + 28],
+        fill=COLOR_TABLE_HDR,
+        width=2,
+    )
 
-    # テーブルを描画し、カラムY座標を記録
-    col_y_map = {}  # tname -> {col_name: center_y}
+    # ── テーブル描画 ────────────────────────────────────────────────────
+    col_y_map = {}
     for tname, (tx, ty) in TABLE_POSITIONS.items():
-        col_y_map[tname] = _draw_table(draw, tx, ty, tname, font, font_bold)
+        col_y_map[tname] = _draw_table(draw, tx, ty, tname, font_body, font_hdr, font_small)
 
-    # FK矢印を描画
-    for from_t, to_t, fk_col in FK_RELATIONS:
+    # ── FK 矢印 ─────────────────────────────────────────────────────────
+    for i, (from_t, to_t, fk_col) in enumerate(FK_RELATIONS):
         fx, fy = TABLE_POSITIONS[from_t]
         tx, ty = TABLE_POSITIONS[to_t]
-        tw = _table_width()
 
         from_col_y = col_y_map[from_t].get(fk_col, fy + HDR_H + 10)
+        to_col_y   = col_y_map[to_t].get("id", ty + HDR_H + 10)
 
-        # to側はidカラムのY
-        to_col_y = col_y_map[to_t].get("id", ty + HDR_H + 10)
-
-        # 始点: fromテーブルの右端 or 左端
-        if fx > tx:
+        # 始点・終点（テーブルの左右端）
+        if fx >= tx:          # fromが右側 → 左端 → 右端
             x1 = fx
-            x2 = tx + tw
-        else:
-            x1 = fx + tw
+            x2 = tx + TABLE_W
+        else:                  # fromが左側 → 右端 → 左端
+            x1 = fx + TABLE_W
             x2 = tx
 
-        _draw_arrow(draw, x1, from_col_y, x2, to_col_y, COLOR_FK_LINE, font)
+        # 複数矢印の重なり防止（同じ from→to ペアにoffsetを付ける）
+        offset = (i % 2) * 20 - 10
 
-        # ラベル
-        lx = (x1 + x2) // 2
-        ly = (from_col_y + to_col_y) // 2 - 8
-        draw.text((lx, ly), fk_col, fill=COLOR_FK_LINE, font=font, anchor="mt")
+        _draw_fk_arrow(
+            draw, x1, from_col_y, x2, to_col_y,
+            label=fk_col,
+            color=COLOR_FK_LINE,
+            font=font_small,
+            offset_x=offset,
+        )
 
-    # 凡例
-    legend_x, legend_y = 30, IMG_H - 60
-    draw.rectangle([legend_x, legend_y, legend_x+14, legend_y+14],
-                   fill=COLOR_TABLE_HDR)
-    draw.text((legend_x+20, legend_y), "テーブル", fill=(30,30,80), font=font)
-    draw.line([legend_x+120, legend_y+7, legend_x+160, legend_y+7],
-              fill=COLOR_FK_LINE, width=2)
-    draw.text((legend_x+170, legend_y), "FK（外部キー）", fill=(30,30,80), font=font)
-    draw.text((legend_x+320, legend_y), "赤字=PK/FK", fill=COLOR_TEXT_KEY, font=font)
+    # ── 凡例 ────────────────────────────────────────────────────────────
+    lx, ly = 60, IMG_H - 70
+    # 背景
+    draw.rectangle([lx - 10, ly - 10, lx + 520, ly + 40], fill=(235, 238, 248),
+                   outline=COLOR_BORDER, width=1)
+    # テーブルアイコン
+    draw.rectangle([lx, ly + 4, lx + 18, ly + 22], fill=COLOR_TABLE_HDR)
+    draw.text((lx + 26, ly + 4), "テーブル", fill=COLOR_TEXT_BODY, font=font_small)
+    # FK線
+    draw.line([lx + 120, ly + 13, lx + 160, ly + 13], fill=COLOR_FK_LINE, width=2)
+    draw.polygon(
+        [(lx+160, ly+13), (lx+153, ly+9), (lx+153, ly+17)],
+        fill=COLOR_FK_LINE,
+    )
+    draw.text((lx + 168, ly + 4), "外部キー (FK)", fill=COLOR_TEXT_BODY, font=font_small)
+    # PK
+    draw.text((lx + 290, ly + 4), "PK = 主キー", fill=COLOR_TEXT_PK, font=font_small)
+    # FK列
+    draw.text((lx + 400, ly + 4), "FK = 外部キー列", fill=COLOR_TEXT_FK, font=font_small)
 
     img.save(str(out_path), dpi=(150, 150))
     print(f"ER図出力: {out_path}")
