@@ -261,6 +261,30 @@ else:
 "
     ;;
 
+  balance)
+    echo "=== 口座残高 ==="
+    cd "$PROJECT_DIR"
+    if [ -d "venv" ]; then source venv/bin/activate; fi
+    if [ -d ".venv" ]; then source .venv/bin/activate; fi
+    python3 -c "
+from src.broker.account import get_account_info
+try:
+    acc = get_account_info()
+    print(f'Total Equity : \${acc.total_equity:,.2f} USD')
+    print(f'Cash         : \${acc.cash:,.2f} USD')
+    print(f'Market Value : \${acc.market_value:,.2f} USD')
+    print(f'Positions    : {len(acc.positions)}件')
+    if acc.positions:
+        print()
+        print('--- 保有ポジション ---')
+        for p in acc.positions:
+            print(f\"  {p['ticker']:6s}  {p['qty']}株  avg=\${p['avg_price']:.2f}  val=\${p['market_value']:.2f}  pnl=\${p['pnl']:.2f}\")
+except Exception as e:
+    print(f'ERROR: {e}')
+    import sys; sys.exit(1)
+"
+    ;;
+
   simulate)
     echo "=== バックテスト（シミュレーション） ==="
     cd "$PROJECT_DIR"
@@ -300,7 +324,8 @@ else:
     echo "  install    systemdにサービス・タイマーを登録"
     echo ""
     echo "--- 動作確認（口座不要） ---"
-    echo "  ping       OpenD接続確認（ログイン状態チェック）"
+    echo "  balance    口座残高を表示（USD）
+  ping       OpenD接続確認（ログイン状態チェック）"
     echo "  check      importテスト（パッケージ不足の検出）"
     echo "  fetch [銘柄] yfinanceデータ取得テスト（デフォルト: AAPL）"
     echo "  simulate   バックテスト実行（過去データでシミュレーション）"
