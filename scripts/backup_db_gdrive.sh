@@ -14,7 +14,7 @@ set -euo pipefail
 
 # ── 設定 ────────────────────────────────────────────────────
 DB_USER="autotrd"
-DB_NAME="autoTRD"
+DB_NAME="autotrd"
 BACKUP_DIR="/home/trader/backup"
 GDRIVE_REMOTE="gdrive"                        # rclone remote 名
 GDRIVE_DIR="autoTRD/db_backups"              # Google Drive 上のフォルダパス
@@ -31,7 +31,7 @@ BACKUP_FILE="${BACKUP_DIR}/autoTRD_db_${TIMESTAMP}.sql.gz"
 
 # ── pg_dump 実行 ─────────────────────────────────────────────
 echo "${LOG_PREFIX} pg_dump 開始: ${BACKUP_FILE}"
-pg_dump -U "$DB_USER" "$DB_NAME" | gzip > "$BACKUP_FILE"
+pg_dump -h localhost -U "$DB_USER" "$DB_NAME" | gzip > "$BACKUP_FILE"
 
 if [ $? -ne 0 ]; then
     echo "${LOG_PREFIX} ❌ pg_dump 失敗"
