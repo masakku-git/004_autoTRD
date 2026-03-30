@@ -70,9 +70,16 @@ case "${1}" in
     echo ""
     # DRY_RUN設定
     if grep -q "^DRY_RUN=true" "$PROJECT_DIR/.env" 2>/dev/null; then
-      echo "Mode:   DRY_RUN (模擬実行)"
+      echo "Mode:      DRY_RUN (模擬実行)"
     else
-      echo "Mode:   LIVE (本番取引)"
+      echo "Mode:      LIVE (本番取引)"
+    fi
+    # MOOMOO_TRADE_ENV設定
+    TRADE_ENV=$(grep "^MOOMOO_TRADE_ENV=" "$PROJECT_DIR/.env" 2>/dev/null | cut -d= -f2)
+    if [ "$TRADE_ENV" = "REAL" ]; then
+      echo "TradeEnv:  REAL (本番口座)"
+    else
+      echo "TradeEnv:  SIMULATE (模擬口座)"
     fi
     ;;
 

@@ -362,6 +362,9 @@ def _build_summary(
         "volatile": "VIX>30 の不安定な相場（新規エントリーを縮小・慎重モード）",
     }.get(regime_raw, "")
 
+    mode_str = "DRY_RUN (模擬実行)" if settings.dry_run else "LIVE (本番取引)"
+    trade_env_str = "REAL (本番口座)" if settings.moomoo_trade_env == "REAL" else "SIMULATE (模擬口座)"
+
     lines = [
         f"日付: {today_jst()}",
         "",
@@ -432,6 +435,13 @@ def _build_summary(
         lines.append(f"【リスク管理に却下されたシグナル ({len(risk_rejected_orders)}件)】")
         for signal, approval in risk_rejected_orders:
             lines.append(f"  x BUY {signal.ticker}: {approval.reason[:70]}")
+
+    lines += [
+        "",
+        "【動作モード】",
+        f"  Mode:     {mode_str}",
+        f"  TradeEnv: {trade_env_str}",
+    ]
 
     return "\n".join(lines)
 
