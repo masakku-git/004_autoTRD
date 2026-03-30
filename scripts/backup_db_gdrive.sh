@@ -13,7 +13,7 @@
 set -euo pipefail
 
 # ── 設定 ────────────────────────────────────────────────────
-DB_USER="trader"
+DB_USER="autotrd"
 DB_NAME="autoTRD"
 BACKUP_DIR="/home/trader/backup"
 GDRIVE_REMOTE="gdrive"                        # rclone remote 名
