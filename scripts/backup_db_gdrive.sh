@@ -53,7 +53,7 @@ echo "${LOG_PREFIX} ✅ Google Drive アップロード完了"
 
 # ── Google Drive の古いファイルを削除（件数超過分） ───────────
 echo "${LOG_PREFIX} Google Drive の古いファイルを整理中..."
-REMOTE_FILES=$(rclone lsf "${GDRIVE_REMOTE}:${GDRIVE_DIR}/" --format "t;n" | sort -r | tail -n +$((KEEP_REMOTE_FILES + 1)) | cut -d';' -f2)
+REMOTE_FILES=$(rclone lsf "${GDRIVE_REMOTE}:${GDRIVE_DIR}/" | sort -r | tail -n +$((KEEP_REMOTE_FILES + 1)))
 
 if [ -n "$REMOTE_FILES" ]; then
     while IFS= read -r fname; do
