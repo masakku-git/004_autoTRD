@@ -88,7 +88,7 @@ def _submit_to_moomoo(signal: Signal, quantity: int) -> str:
             host=settings.moomoo_host,
             port=settings.moomoo_port,
             filter_trdmarket=TrdMarket.US,
-            security_firm=SecurityFirm.FUTUINC,
+            security_firm=SecurityFirm.FUTUSECURITIES,
         )
         try:
             if trd_env == TrdEnv.REAL and settings.moomoo_trade_password_md5:
