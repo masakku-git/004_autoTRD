@@ -41,7 +41,7 @@ def get_account_info() -> AccountInfo:
                 host=settings.moomoo_host,
                 port=settings.moomoo_port,
                 filter_trdmarket=TrdMarket.US,
-                security_firm=SecurityFirm.FUTUSECURITIES,
+                security_firm=SecurityFirm.FUTUJP,
             )
             try:
                 ret, funds = ctx.accinfo_query(trd_env=trd_env)
