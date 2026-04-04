@@ -44,7 +44,7 @@ def get_account_info() -> AccountInfo:
                 security_firm=SecurityFirm.FUTUJP,
             )
             try:
-                ret, funds = ctx.accinfo_query(trd_env=trd_env)
+                ret, funds = ctx.accinfo_query(trd_env=trd_env, currency=None)
                 if ret != 0:
                     raise RuntimeError(f"Account query failed: {funds}")
 
