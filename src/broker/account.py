@@ -32,7 +32,7 @@ def get_account_info() -> AccountInfo:
         )
 
     try:
-        from moomoo import OpenSecTradeContext, SecurityFirm, TrdEnv, TrdMarket
+        from moomoo import Currency, OpenSecTradeContext, SecurityFirm, TrdEnv, TrdMarket
 
         trd_env = TrdEnv.SIMULATE if settings.moomoo_trade_env == "SIMULATE" else TrdEnv.REAL
 
@@ -44,7 +44,7 @@ def get_account_info() -> AccountInfo:
                 security_firm=SecurityFirm.FUTUJP,
             )
             try:
-                ret, funds = ctx.accinfo_query(trd_env=trd_env, currency=None)
+                ret, funds = ctx.accinfo_query(trd_env=trd_env, currency=Currency.USD)
                 if ret != 0:
                     raise RuntimeError(f"Account query failed: {funds}")
 
