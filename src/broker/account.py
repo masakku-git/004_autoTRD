@@ -32,7 +32,7 @@ def get_account_info() -> AccountInfo:
         )
 
     try:
-        from moomoo import OpenSecTradeContext, TrdEnv, TrdMarket
+        from moomoo import OpenSecTradeContext, SecurityFirm, TrdEnv, TrdMarket
 
         trd_env = TrdEnv.SIMULATE if settings.moomoo_trade_env == "SIMULATE" else TrdEnv.REAL
 
@@ -41,7 +41,7 @@ def get_account_info() -> AccountInfo:
                 host=settings.moomoo_host,
                 port=settings.moomoo_port,
                 filter_trdmarket=TrdMarket.US,
-                security_firm=None,
+                security_firm=SecurityFirm.FUTUINC,
             )
             try:
                 ret, funds = ctx.accinfo_query(trd_env=trd_env)
