@@ -14,7 +14,7 @@ class Base(DeclarativeBase):
 
 # DB接続エンジンとセッションファクトリ
 engine = create_engine(settings.database_url, echo=False)
-SessionLocal = sessionmaker(bind=engine)
+SessionLocal = sessionmaker(bind=engine, expire_on_commit=False)
 
 
 def get_session() -> Session:
