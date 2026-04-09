@@ -427,10 +427,10 @@ def _save_evaluation(signal: Signal, verdict: CriticVerdict, strategy_name: str)
             ticker=signal.ticker,
             action=signal.action,
             strategy_name=strategy_name,
-            original_confidence=verdict.original_confidence,
-            adjusted_confidence=verdict.adjusted_confidence,
+            original_confidence=float(verdict.original_confidence),
+            adjusted_confidence=float(verdict.adjusted_confidence),
             objections=[
-                {"check": o.check, "penalty": o.penalty, "reason": o.reason}
+                {"check": o.check, "penalty": float(o.penalty), "reason": o.reason}
                 for o in verdict.objections
             ],
             num_objections=len(verdict.objections),

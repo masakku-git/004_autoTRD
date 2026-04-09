@@ -21,6 +21,14 @@ class Signal:
     take_profit_1: float = 0.0  # 段階利確の第1ターゲット（0 = 未使用）
     max_hold_days: int = 20  # 最大保有日数（超過で強制決済）
 
+    def __post_init__(self):
+        # numpy型がそのままDBに渡されるとエラーになるため Python ネイティブ型に変換
+        self.confidence = float(self.confidence)
+        self.stop_loss = float(self.stop_loss)
+        self.take_profit = float(self.take_profit)
+        self.price = float(self.price)
+        self.take_profit_1 = float(self.take_profit_1)
+
 
 @dataclass
 class ExitDecision:
