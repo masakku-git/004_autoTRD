@@ -92,7 +92,7 @@ def _submit_to_moomoo(signal: Signal, quantity: int) -> str:
         )
         try:
             if trd_env == TrdEnv.REAL and settings.moomoo_trade_password_md5:
-                ret, msg = ctx.unlock_trade(settings.moomoo_trade_password_md5)
+                ret, msg = ctx.unlock_trade(password_md5=settings.moomoo_trade_password_md5)
                 if ret != 0:
                     raise RuntimeError(f"Failed to unlock trade: {msg}")
 
