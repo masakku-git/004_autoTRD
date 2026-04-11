@@ -211,14 +211,14 @@ def run_daily():
     )
 
     # --- Step 6: 注文実行（リスク管理チェック後に発注） ---
-    executed_orders = []
+    executed_orders = []   # 成功した注文（dict形式）
+    failed_orders = []     # 失敗した注文（dict形式）
     risk_rejected_orders = []
 
     # 売り注文を先に処理（資金を解放してから買いに回す）
     for signal in sell_signals:
         approval = approve_trade(signal, account, market_condition)
         if approval.approved:
-            # Find quantity from existing position
             pos = next(
                 (p for p in account.positions if signal.ticker in p["ticker"]),
                 None,
@@ -227,9 +227,18 @@ def run_daily():
             if qty > 0:
                 order = place_order(signal, qty)
                 close_trade_log(signal.ticker, order, signal.take_profit)
-                executed_orders.append(
-                    f"SELL {qty}x {signal.ticker}: {signal.reason[:60]}"
-                )
+                entry = {
+                    "action": "SELL",
+                    "ticker": signal.ticker,
+                    "qty": qty,
+                    "price": signal.price,
+                    "reason": signal.reason,
+                    "status": order.status,
+                }
+                if order.status in ("SUBMITTED", "DRY_RUN"):
+                    executed_orders.append(entry)
+                else:
+                    failed_orders.append(entry)
 
     # 買い注文をスクリーニングスコア順に処理（ポジションサイズはリスク管理が算出）
     buy_signals.sort(key=lambda s: s.screen_score, reverse=True)
@@ -239,19 +248,31 @@ def run_daily():
         approval = approve_trade(signal, account, market_condition)
         if approval.approved and approval.quantity > 0:
             order = place_order(signal, approval.quantity)
-            # signal生成元の戦略名を特定してorderに設定
             order.strategy_name = _find_strategy_name_for_signal(signal, strategies)
             create_trade_log(signal, order, approval.quantity)
-            executed_orders.append(
-                f"BUY {approval.quantity}x {signal.ticker}: {signal.reason[:60]}"
-            )
+            est_cost = signal.price * approval.quantity if signal.price else 0
+            entry = {
+                "action": "BUY",
+                "ticker": signal.ticker,
+                "qty": approval.quantity,
+                "price": signal.price,
+                "stop_loss": signal.stop_loss,
+                "take_profit": signal.take_profit,
+                "est_cost": est_cost,
+                "reason": signal.reason,
+                "status": order.status,
+            }
+            if order.status in ("SUBMITTED", "DRY_RUN"):
+                executed_orders.append(entry)
+            else:
+                failed_orders.append(entry)
         else:
             risk_rejected_orders.append((signal, approval))
 
     # --- Step 7: 日次レポート作成 & Slack通知 ---
     summary = _build_summary(
         account, market_condition, candidates,
-        forced_exit_orders + executed_orders, rejected_signals,
+        forced_exit_orders, executed_orders, failed_orders, rejected_signals,
         buy_count=len(buy_signals), sell_count=len(sell_signals),
         risk_rejected_orders=risk_rejected_orders,
     )
@@ -343,7 +364,8 @@ def _get_previous_equity() -> float:
 
 
 def _build_summary(
-    account, market_condition, candidates, executed_orders, rejected_signals=None,
+    account, market_condition, candidates,
+    forced_exit_orders, executed_orders, failed_orders, rejected_signals=None,
     buy_count: int = 0, sell_count: int = 0, risk_rejected_orders=None,
 ) -> str:
     rejected_signals = rejected_signals or []
@@ -356,7 +378,6 @@ def _build_summary(
     regime_ja = {"trending": "トレンド相場", "range": "レンジ相場", "volatile": "高ボラ相場"}.get(regime_raw, regime_raw)
     trend_ja = {"bull": "強気(上昇)", "bear": "弱気(下落)", "neutral": "中立(横ばい)"}.get(trend_raw, trend_raw)
 
-    # 市場レジームの説明文
     regime_desc = {
         "trending": "明確なトレンドが出ている相場（ブレイクアウト・モメンタム戦略が有効）",
         "range":    "方向感のない横ばい相場（逆張り・レンジ戦略が有効）",
@@ -376,7 +397,6 @@ def _build_summary(
         f"  └ {regime_desc}",
     ]
 
-    # ベア相場・高VIX時の取引抑制アラート
     if trend_raw == "bear":
         lines.append("  ⚠ ベア相場のため全戦略がBUYシグナルを生成しません（新規買いなし）")
     if vix >= 30:
@@ -390,52 +410,108 @@ def _build_summary(
         f"  総資産        : ${account.total_equity:.2f}",
         f"  現金          : ${account.cash:.2f}",
         f"  保有ポジション : {len(account.positions)}件",
+    ]
+
+    if account.positions:
+        lines.append("  ポジション詳細:")
+        for p in account.positions:
+            ticker = p.get("ticker", "").replace("US.", "")
+            lines.append(
+                f"    {ticker}: {p.get('qty')}株 "
+                f"@ avg${p.get('avg_price', 0):.2f}  "
+                f"評価額${p.get('market_value', 0):.2f}  "
+                f"損益${p.get('pnl', 0):.2f}"
+            )
+
+    lines += [
         "",
         "【シグナル診断】",
-        f"  スクリーニング通過 : {len(candidates)}銘柄（最大15銘柄）",
+        f"  スクリーニング通過 : {len(candidates)}銘柄",
         f"  BUYシグナル       : {buy_count}件",
         f"  SELLシグナル      : {sell_count}件",
         f"  Criticに却下      : {len(rejected_signals)}件",
         f"  リスク管理で却下  : {len(risk_rejected_orders)}件",
-        f"  約定注文          : {len(executed_orders)}件",
     ]
 
-    for order in executed_orders:
-        lines.append(f"    - {order}")
+    # 強制エグジット
+    if forced_exit_orders:
+        lines.append("")
+        lines.append(f"【強制決済 ({len(forced_exit_orders)}件)】")
+        for o in forced_exit_orders:
+            lines.append(f"  {o}")
 
-    # スクリーニング通過銘柄 上位5銘柄
+    # 約定成功
+    buy_exec = [o for o in executed_orders if o["action"] == "BUY"]
+    sell_exec = [o for o in executed_orders if o["action"] == "SELL"]
+
+    if executed_orders:
+        lines.append("")
+        lines.append(f"【約定成功 ({len(executed_orders)}件)】")
+        for o in buy_exec:
+            sl = o.get("stop_loss", 0)
+            tp = o.get("take_profit", 0)
+            cost = o.get("est_cost", 0)
+            lines.append(
+                f"  ✓ BUY {o['qty']}株 {o['ticker']}"
+                f"  @ ${o.get('price', 0):.2f}"
+                f"  SL:${sl:.2f}  TP:${tp:.2f}"
+                f"  推定コスト:${cost:.2f}"
+            )
+            lines.append(f"    理由: {o['reason'][:80]}")
+        for o in sell_exec:
+            lines.append(
+                f"  ✓ SELL {o['qty']}株 {o['ticker']}"
+                f"  @ ${o.get('price', 0):.2f}"
+            )
+            lines.append(f"    理由: {o['reason'][:80]}")
+    else:
+        lines.append("")
+        lines.append("【約定成功】 0件")
+
+    # 発注失敗
+    if failed_orders:
+        lines.append("")
+        lines.append(f"【発注失敗 ({len(failed_orders)}件)】")
+        for o in failed_orders:
+            cost = o.get("est_cost", 0)
+            lines.append(
+                f"  ✗ {o['action']} {o['qty']}株 {o['ticker']}"
+                f"  推定コスト:${cost:.2f}"
+            )
+
+    # リスク管理で却下
+    if risk_rejected_orders:
+        lines.append("")
+        lines.append(f"【リスク管理で却下 ({len(risk_rejected_orders)}件)】")
+        for signal, approval in risk_rejected_orders:
+            lines.append(f"  ✗ BUY {signal.ticker}: {approval.reason[:70]}")
+
+    # Criticで却下
+    if rejected_signals:
+        lines.append("")
+        lines.append(f"【Criticに却下 ({len(rejected_signals)}件)】")
+        for signal, verdict in rejected_signals:
+            top_objection = verdict.objections[0].reason if verdict.objections else "N/A"
+            lines.append(
+                f"  ✗ {signal.action} {signal.ticker} "
+                f"(信頼度 {verdict.original_confidence:.2f}→{verdict.adjusted_confidence:.2f}): "
+                f"{top_objection[:60]}"
+            )
+
+    # スクリーニング上位5銘柄
     if candidates:
         lines.append("")
-        lines.append(f"【スクリーニング候補 上位{min(5, len(candidates))}銘柄】")
-        lines.append(f"  {'銘柄':<8} {'株価':>7} {'ATR%':>6} {'相対強度':>8} {'スコア':>7}")
-        lines.append(f"  {'-'*8} {'-'*7} {'-'*6} {'-'*8} {'-'*7}")
+        lines.append(f"【スクリーニング上位{min(5, len(candidates))}銘柄】")
+        lines.append(f"  {'銘柄':<6} {'株価':>7} {'ATR%':>6} {'相対強度':>8} {'スコア':>7}")
+        lines.append(f"  {'------':<6} {'-------':>7} {'------':>6} {'--------':>8} {'-------':>7}")
         for c in candidates[:5]:
             lines.append(
-                f"  {c['ticker']:<8} "
+                f"  {c['ticker']:<6} "
                 f"${c['last_close']:>6.2f} "
                 f"{c['atr_pct']:>5.1f}% "
                 f"{c['relative_strength']:>+7.1f}% "
                 f"{c['score']:>7.2f}"
             )
-
-    # Criticに却下されたシグナルの詳細
-    if rejected_signals:
-        lines.append("")
-        lines.append(f"【Criticに却下されたシグナル ({len(rejected_signals)}件)】")
-        for signal, verdict in rejected_signals:
-            top_objection = verdict.objections[0].reason if verdict.objections else "N/A"
-            lines.append(
-                f"  x {signal.action} {signal.ticker} "
-                f"(信頼度 {verdict.original_confidence:.2f}→{verdict.adjusted_confidence:.2f}): "
-                f"{top_objection[:60]}"
-            )
-
-    # リスク管理に却下されたシグナルの詳細
-    if risk_rejected_orders:
-        lines.append("")
-        lines.append(f"【リスク管理に却下されたシグナル ({len(risk_rejected_orders)}件)】")
-        for signal, approval in risk_rejected_orders:
-            lines.append(f"  x BUY {signal.ticker}: {approval.reason[:70]}")
 
     lines += [
         "",
