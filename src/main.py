@@ -199,6 +199,7 @@ def run_daily():
                 verdict = evaluate_signal(signal, df, market_condition, strategy.name)
                 if verdict.approved:
                     signal.confidence = verdict.adjusted_confidence
+                    signal.screen_score = candidate["score"]
                     buy_signals.append(signal)
                 else:
                     rejected_signals.append((signal, verdict))
@@ -230,8 +231,8 @@ def run_daily():
                     f"SELL {qty}x {signal.ticker}: {signal.reason[:60]}"
                 )
 
-    # 買い注文を信頼度順に処理（ポジションサイズはリスク管理が算出）
-    buy_signals.sort(key=lambda s: s.confidence, reverse=True)
+    # 買い注文をスクリーニングスコア順に処理（ポジションサイズはリスク管理が算出）
+    buy_signals.sort(key=lambda s: s.screen_score, reverse=True)
     for signal in buy_signals:
         # Refresh account after sells
         account = get_account_info()

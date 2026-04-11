@@ -20,6 +20,7 @@ class Signal:
     price: float = 0.0  # entry price at signal generation time
     take_profit_1: float = 0.0  # 段階利確の第1ターゲット（0 = 未使用）
     max_hold_days: int = 20  # 最大保有日数（超過で強制決済）
+    screen_score: float = 0.0  # スクリーニングスコア（発注優先度に使用）
 
     def __post_init__(self):
         # numpy型がそのままDBに渡されるとエラーになるため Python ネイティブ型に変換
@@ -28,6 +29,7 @@ class Signal:
         self.take_profit = float(self.take_profit)
         self.price = float(self.price)
         self.take_profit_1 = float(self.take_profit_1)
+        self.screen_score = float(self.screen_score)
 
 
 @dataclass
