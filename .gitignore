@@ -20,3 +20,4 @@ data/universe_cache.json
 chat/
 xx_clip_pic/
 logs/
+scripts/sync_logs.sh
