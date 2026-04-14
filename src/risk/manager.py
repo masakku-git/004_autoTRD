@@ -120,9 +120,9 @@ def approve_trade(
             reason=f"Calculated quantity is 0 (risk=${risk_amount:.2f}, risk/share=${risk_per_share:.2f})",
         )
 
-    # Rule 5: Position cost cannot exceed 40% of equity
+    # Rule 5: Position cost cannot exceed 20% of equity
     position_cost = quantity * entry_estimate
-    max_position_cost = account.total_equity * 0.40
+    max_position_cost = account.total_equity * 0.20
     if position_cost > max_position_cost:
         quantity = int(max_position_cost / entry_estimate)
         if quantity <= 0:
