@@ -240,11 +240,14 @@ def run_daily():
                 else:
                     failed_orders.append(entry)
 
+    # 売り注文・強制エグジット後に口座を再取得（現金解放を反映）
+    if sell_signals or forced_exit_orders:
+        account = get_account_info()
+
     # 買い注文をスクリーニングスコア順に処理（ポジションサイズはリスク管理が算出）
+    # moomooへの残高反映タイムラグを考慮し、発注成功のたびに account.cash を手動で差し引く
     buy_signals.sort(key=lambda s: s.screen_score, reverse=True)
     for signal in buy_signals:
-        # Refresh account after sells
-        account = get_account_info()
         approval = approve_trade(signal, account, market_condition)
         if approval.approved and approval.quantity > 0:
             order = place_order(signal, approval.quantity)
@@ -264,6 +267,8 @@ def run_daily():
             }
             if order.status in ("SUBMITTED", "DRY_RUN"):
                 executed_orders.append(entry)
+                # 発注済コストを現金から差し引き、次の銘柄の承認判断に反映する
+                account.cash = max(0.0, account.cash - est_cost)
             else:
                 failed_orders.append(entry)
         else:
