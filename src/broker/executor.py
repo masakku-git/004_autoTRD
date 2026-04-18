@@ -1,6 +1,7 @@
 """注文執行（moomoo APIへの発注・トレードログの記録・DRY_RUNモード対応）"""
 from __future__ import annotations
 
+import time
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FuturesTimeoutError
 from datetime import datetime
@@ -10,6 +11,9 @@ from src.models.base import get_session
 from src.models.trade import Order, TradeLog
 from src.strategy.base import Signal
 from src.utils.logger import logger
+
+FILL_POLL_INTERVAL = 2   # seconds between polls
+FILL_POLL_TIMEOUT = 60   # max wait for fill confirmation
 
 
 def place_order(signal: Signal, quantity: int, strategy_name: str = "unknown") -> Order:
@@ -30,7 +34,7 @@ def place_order(signal: Signal, quantity: int, strategy_name: str = "unknown") -
 
     # Determine price: use current market for simplicity
     # In real implementation, would use limit price based on signal
-    order.price = signal.take_profit if signal.action == "SELL" else signal.stop_loss
+    order.price = signal.take_profit if signal.action == "SELL" else signal.price
 
     with get_session() as session:
         session.add(order)
@@ -42,6 +46,8 @@ def place_order(signal: Signal, quantity: int, strategy_name: str = "unknown") -
                 f"DRY_RUN: {signal.action} {quantity} shares of {signal.ticker} "
                 f"(strategy: {signal.reason[:50]})"
             )
+            order.filled_price = signal.price or order.price
+            order.filled_at = datetime.utcnow()
             order.status = "DRY_RUN"
             session.commit()
             return order
@@ -55,6 +61,13 @@ def place_order(signal: Signal, quantity: int, strategy_name: str = "unknown") -
                 f"Order submitted: {signal.action} {quantity}x {signal.ticker} "
                 f"(broker_id={broker_order_id})"
             )
+            trd_env = "SIMULATE" if settings.moomoo_trade_env == "SIMULATE" else "REAL"
+            filled_price = _poll_for_fill(broker_order_id, trd_env)
+            if filled_price is not None:
+                order.filled_price = filled_price
+                order.filled_at = datetime.utcnow()
+                order.status = "FILLED"
+                logger.info(f"Order filled: {signal.action} {quantity}x {signal.ticker} @ ${filled_price:.2f}")
         except Exception as e:
             order.status = "FAILED"
             logger.error(f"Order failed for {signal.ticker}: {e}")
@@ -125,6 +138,40 @@ def _submit_to_moomoo(signal: Signal, quantity: int) -> str:
             raise RuntimeError(err)
 
 
+def _poll_for_fill(broker_order_id: str, trd_env_str: str) -> float | None:
+    """Poll moomoo until MARKET order is fully filled. Returns dealt_avg_price or None on timeout."""
+    try:
+        from moomoo import OpenSecTradeContext, SecurityFirm, TrdEnv, TrdMarket
+    except ImportError:
+        return None
+
+    trd_env = TrdEnv.SIMULATE if trd_env_str == "SIMULATE" else TrdEnv.REAL
+
+    ctx = OpenSecTradeContext(
+        host=settings.moomoo_host,
+        port=settings.moomoo_port,
+        filter_trdmarket=TrdMarket.US,
+        security_firm=SecurityFirm.FUTUJP,
+    )
+    try:
+        for _ in range(FILL_POLL_TIMEOUT // FILL_POLL_INTERVAL):
+            ret, data = ctx.order_list_query(trd_env=trd_env, acc_id=0)
+            if ret == 0 and not data.empty:
+                rows = data[data["order_id"].astype(str) == str(broker_order_id)]
+                if not rows.empty:
+                    row = rows.iloc[0]
+                    if str(row["order_status"]) == "FILLED_ALL":
+                        return float(row["dealt_avg_price"])
+            time.sleep(FILL_POLL_INTERVAL)
+    except Exception as e:
+        logger.error(f"Fill poll error for order {broker_order_id}: {e}")
+    finally:
+        ctx.close()
+
+    logger.warning(f"Fill poll timeout: order {broker_order_id} not confirmed filled within {FILL_POLL_TIMEOUT}s")
+    return None
+
+
 def _notify_opend_error(message: str) -> None:
     """OpenD接続失敗時にSlack通知を送る（循環importを避けるため遅延import）"""
     try:
@@ -146,7 +193,7 @@ def create_trade_log(
             ticker=signal.ticker,
             entry_order_id=order.id,
             entry_date=datetime.utcnow().date(),
-            entry_price=order.price or 0,
+            entry_price=order.filled_price or order.price or 0,
             quantity=quantity,
             strategy_name=order.strategy_name,
             stop_loss=signal.stop_loss,
@@ -173,11 +220,12 @@ def close_trade_log(
         ).scalar_one_or_none()
 
         if trade:
+            actual_exit_price = exit_order.filled_price or exit_price
             trade.exit_order_id = exit_order.id
             trade.exit_date = datetime.utcnow().date()
-            trade.exit_price = exit_price
-            trade.pnl = (exit_price - trade.entry_price) * trade.quantity
-            trade.pnl_pct = (exit_price / trade.entry_price - 1) * 100 if trade.entry_price else 0
+            trade.exit_price = actual_exit_price
+            trade.pnl = (actual_exit_price - trade.entry_price) * trade.quantity
+            trade.pnl_pct = (actual_exit_price / trade.entry_price - 1) * 100 if trade.entry_price else 0
             trade.status = "CLOSED"
             session.commit()
             logger.info(
@@ -199,9 +247,10 @@ def partial_close_trade_log(
         ).scalar_one_or_none()
 
         if trade:
-            partial_pnl = (exit_price - trade.entry_price) * sold_qty
+            actual_exit_price = exit_order.filled_price or exit_price
+            partial_pnl = (actual_exit_price - trade.entry_price) * sold_qty
             note = (
-                f"段階決済: {sold_qty}株 @ ${exit_price:.2f}, "
+                f"段階決済: {sold_qty}株 @ ${actual_exit_price:.2f}, "
                 f"PnL=${partial_pnl:.2f}"
             )
             trade.quantity -= sold_qty
