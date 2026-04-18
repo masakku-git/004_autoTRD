@@ -12,7 +12,7 @@ from src.strategy.base import Signal
 from src.utils.logger import logger
 
 
-def place_order(signal: Signal, quantity: int) -> Order:
+def place_order(signal: Signal, quantity: int, strategy_name: str = "unknown") -> Order:
     """Place an order based on a trading signal.
 
     In DRY_RUN mode, logs the order but does not submit to broker.
@@ -24,7 +24,7 @@ def place_order(signal: Signal, quantity: int) -> Order:
         quantity=quantity,
         price=signal.stop_loss if signal.action == "SELL" else None,
         status="PENDING",
-        strategy_name="unknown",
+        strategy_name=strategy_name,
         created_at=datetime.utcnow(),
     )
 

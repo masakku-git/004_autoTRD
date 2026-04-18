@@ -250,8 +250,7 @@ def run_daily():
     for signal in buy_signals:
         approval = approve_trade(signal, account, market_condition)
         if approval.approved and approval.quantity > 0:
-            order = place_order(signal, approval.quantity)
-            order.strategy_name = _find_strategy_name_for_signal(signal, strategies)
+            order = place_order(signal, approval.quantity, strategy_name=_find_strategy_name_for_signal(signal, strategies))
             create_trade_log(signal, order, approval.quantity)
             est_cost = signal.price * approval.quantity if signal.price else 0
             entry = {
