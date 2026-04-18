@@ -21,3 +21,4 @@ chat/
 xx_clip_pic/
 logs/
 scripts/sync_logs.sh
+emergency_recovery/
