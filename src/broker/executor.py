@@ -184,8 +184,18 @@ def _notify_opend_error(message: str) -> None:
 def create_trade_log(
     signal: Signal, order: Order, quantity: int
 ) -> None:
-    """Create a trade log entry for a new position."""
+    """Create a trade log entry for a new position.
+
+    発注失敗時（FAILED/PENDING）は実ポジションが存在しないためtrade_logを作成しない。
+    SUBMITTED / FILLED / DRY_RUN のみ記録対象とする。
+    """
     if signal.action != "BUY":
+        return
+    if order.status in ("FAILED", "PENDING"):
+        logger.info(
+            f"Skip trade_log creation: {signal.ticker} order status={order.status} "
+            f"(no actual position)"
+        )
         return
 
     with get_session() as session:
