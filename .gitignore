@@ -17,6 +17,7 @@ htmlcov/
 doc/
 Simulation/Result/
 data/universe_cache.json
+data/csv_export/
 chat/
 xx_clip_pic/
 logs/
