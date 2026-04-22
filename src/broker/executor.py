@@ -86,6 +86,7 @@ def _submit_to_moomoo(signal: Signal, quantity: int) -> str:
             OpenSecTradeContext,
             OrderType,
             SecurityFirm,
+            SubAccType,
             TrdEnv,
             TrdMarket,
             TrdSide,
@@ -111,6 +112,14 @@ def _submit_to_moomoo(signal: Signal, quantity: int) -> str:
 
             moomoo_ticker = f"US.{signal.ticker}" if not signal.ticker.startswith("US.") else signal.ticker
 
+            try:
+                sub_acc_type = getattr(SubAccType, settings.moomoo_jp_acc_type)
+            except AttributeError as exc:
+                raise RuntimeError(
+                    f"Invalid moomoo_jp_acc_type='{settings.moomoo_jp_acc_type}'. "
+                    f"有効値は SubAccType Enum（JP_GENERAL / JP_TOKUTEI / JP_NISA_GENERAL 等）"
+                ) from exc
+
             ret, data = ctx.place_order(
                 price=0,
                 qty=quantity,
@@ -118,6 +127,8 @@ def _submit_to_moomoo(signal: Signal, quantity: int) -> str:
                 trd_side=side,
                 order_type=OrderType.MARKET,
                 trd_env=trd_env,
+                acc_id=settings.moomoo_acc_id,
+                jp_acc_type=sub_acc_type,
             )
 
             if ret != 0:
@@ -155,7 +166,7 @@ def _poll_for_fill(broker_order_id: str, trd_env_str: str) -> float | None:
     )
     try:
         for _ in range(FILL_POLL_TIMEOUT // FILL_POLL_INTERVAL):
-            ret, data = ctx.order_list_query(trd_env=trd_env, acc_id=0)
+            ret, data = ctx.order_list_query(trd_env=trd_env, acc_id=settings.moomoo_acc_id)
             if ret == 0 and not data.empty:
                 rows = data[data["order_id"].astype(str) == str(broker_order_id)]
                 if not rows.empty:

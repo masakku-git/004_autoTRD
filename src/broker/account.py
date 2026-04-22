@@ -44,7 +44,11 @@ def get_account_info() -> AccountInfo:
                 security_firm=SecurityFirm.FUTUJP,
             )
             try:
-                ret, funds = ctx.accinfo_query(trd_env=trd_env, currency=Currency.USD)
+                ret, funds = ctx.accinfo_query(
+                    trd_env=trd_env,
+                    currency=Currency.USD,
+                    acc_id=settings.moomoo_acc_id,
+                )
                 if ret != 0:
                     raise RuntimeError(f"Account query failed: {funds}")
 
@@ -52,7 +56,10 @@ def get_account_info() -> AccountInfo:
                 cash = float(funds["cash"].iloc[0])
                 market_value = float(funds["market_val"].iloc[0])
 
-                ret, pos_df = ctx.position_list_query(trd_env=trd_env)
+                ret, pos_df = ctx.position_list_query(
+                    trd_env=trd_env,
+                    acc_id=settings.moomoo_acc_id,
+                )
                 positions = []
                 if ret == 0 and not pos_df.empty:
                     for _, row in pos_df.iterrows():
