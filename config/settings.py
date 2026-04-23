@@ -14,7 +14,8 @@ class Settings(BaseSettings):
     # JP口座区分（SubAccType）。JP_GENERAL=一般 / JP_TOKUTEI=特定 / JP_NISA_GENERAL=一般NISA 等。
     # place_order() に jp_acc_type として渡される。
     # 公式ドキュメント: https://openapi.moomoo.com/moomoo-api-doc/en/trade/trade.html
-    moomoo_jp_acc_type: str = "JP_GENERAL"
+    # デフォルトは JP_TOKUTEI（特定口座・源泉徴収あり）。税務処理が自動化される安全側の既定値。
+    moomoo_jp_acc_type: str = "JP_TOKUTEI"
 
     # トレーディング基本設定
     dry_run: bool = True                    # True: 注文を実際には送信しない
