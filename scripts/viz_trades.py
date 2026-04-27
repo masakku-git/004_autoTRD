@@ -13,10 +13,15 @@ from __future__ import annotations
 
 import json
 import math
+import re
 from datetime import datetime
 from pathlib import Path
 
 import pandas as pd
+
+PARTIAL_RE = re.compile(
+    r"段階決済:\s*(\d+)株\s*@\s*\$([\d,\.]+),\s*PnL=\$(-?[\d,\.]+)"
+)
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 CSV_DIR = PROJECT_ROOT / "data" / "csv_export"
@@ -55,7 +60,88 @@ def _safe_num(v, default=0.0):
         return default
 
 
-def compute_summary(dfs: dict[str, pd.DataFrame]) -> dict:
+def extract_partial_exits(trades_df: pd.DataFrame, orders_df: pd.DataFrame) -> list[dict]:
+    """trade_log の notes フィールドから段階決済を抽出。
+
+    DBスキーマ上、段階決済の実現損益は trade_log.notes にテキストで記録される
+    （pnl 列は全数決済時のみ書き込み）。本関数はそれを構造化データに変換する。
+    可能であれば orders.csv の SELL 注文と銘柄+数量で突き合わせて exit_date を補完する。
+    """
+    if trades_df.empty:
+        return []
+
+    partials: list[dict] = []
+    for _, r in trades_df.iterrows():
+        notes = r.get("notes")
+        if pd.isna(notes) or not str(notes).strip():
+            continue
+        entry_price = _safe_num(r.get("entry_price"))
+        for line in str(notes).splitlines():
+            m = PARTIAL_RE.search(line)
+            if not m:
+                continue
+            sold_qty = int(m.group(1))
+            exit_price = float(m.group(2).replace(",", ""))
+            pnl = float(m.group(3).replace(",", ""))
+            cost = entry_price * sold_qty
+            pnl_pct = (pnl / cost * 100) if cost > 0 else 0.0
+            partials.append({
+                "ticker": r["ticker"],
+                "quantity": sold_qty,
+                "entry_price": entry_price,
+                "exit_price": exit_price,
+                "pnl": pnl,
+                "pnl_pct": pnl_pct,
+                "strategy_name": r.get("strategy_name", "-"),
+                "entry_date": str(r["entry_date"]) if pd.notna(r.get("entry_date")) else "-",
+                "exit_date": "-",
+                "kind": "部分",
+            })
+
+    if partials and not orders_df.empty and "side" in orders_df.columns:
+        sells = orders_df[orders_df["side"] == "SELL"].copy()
+        if not sells.empty:
+            sells["_ts"] = pd.to_datetime(sells.get("created_at"), errors="coerce")
+            sells = sells.sort_values("_ts")
+            used: set = set()
+            for p in partials:
+                cands = sells[sells["ticker"] == p["ticker"]]
+                for idx, row in cands.iterrows():
+                    if idx in used:
+                        continue
+                    if int(_safe_num(row.get("quantity"))) == p["quantity"]:
+                        ts = row.get("_ts")
+                        if pd.notna(ts):
+                            p["exit_date"] = ts.strftime("%Y-%m-%d")
+                        used.add(idx)
+                        break
+
+    return partials
+
+
+def build_realized_events(trades_df: pd.DataFrame, partials: list[dict]) -> list[dict]:
+    """status=CLOSED のトレードと部分決済を統合した実現損益イベント一覧を返す。"""
+    events: list[dict] = list(partials)
+    if not trades_df.empty:
+        closed = trades_df[trades_df["status"] == "CLOSED"]
+        for _, r in closed.iterrows():
+            events.append({
+                "ticker": r["ticker"],
+                "quantity": int(_safe_num(r.get("quantity"))),
+                "entry_price": _safe_num(r.get("entry_price")),
+                "exit_price": _safe_num(r.get("exit_price")),
+                "pnl": _safe_num(r.get("pnl")),
+                "pnl_pct": _safe_num(r.get("pnl_pct")),
+                "strategy_name": r.get("strategy_name", "-"),
+                "entry_date": str(r["entry_date"]) if pd.notna(r.get("entry_date")) else "-",
+                "exit_date": str(r["exit_date"]) if pd.notna(r.get("exit_date")) else "-",
+                "kind": "全数",
+            })
+    events.sort(key=lambda e: (e["exit_date"] or "0000-00-00"), reverse=True)
+    return events
+
+
+def compute_summary(dfs: dict[str, pd.DataFrame], events: list[dict]) -> dict:
     portfolio = dfs["portfolio_snapshots"]
     trades = dfs["trade_log"]
 
@@ -81,40 +167,39 @@ def compute_summary(dfs: dict[str, pd.DataFrame]) -> dict:
 
     if not trades.empty:
         s["open_count"] = int((trades["status"] == "OPEN").sum())
-        closed = trades[trades["status"] == "CLOSED"].copy()
-        s["closed_count"] = len(closed)
-        if not closed.empty:
-            closed["pnl"] = pd.to_numeric(closed["pnl"], errors="coerce")
-            s["total_pnl"] = float(closed["pnl"].sum())
-            wins = closed[closed["pnl"] > 0]
-            losses = closed[closed["pnl"] <= 0]
-            s["win_rate"] = len(wins) / len(closed) * 100
-            s["avg_win"] = float(wins["pnl"].mean()) if not wins.empty else 0.0
-            s["avg_loss"] = float(losses["pnl"].mean()) if not losses.empty else 0.0
+
+    if events:
+        s["closed_count"] = len(events)
+        s["total_pnl"] = float(sum(e["pnl"] for e in events))
+        wins = [e["pnl"] for e in events if e["pnl"] > 0]
+        losses = [e["pnl"] for e in events if e["pnl"] <= 0]
+        s["win_rate"] = len(wins) / len(events) * 100
+        s["avg_win"] = sum(wins) / len(wins) if wins else 0.0
+        s["avg_loss"] = sum(losses) / len(losses) if losses else 0.0
 
     return s
 
 
-def compute_strategy_perf(trades_df: pd.DataFrame) -> list[dict]:
-    if trades_df.empty:
+def compute_strategy_perf(events: list[dict]) -> list[dict]:
+    if not events:
         return []
-    closed = trades_df[trades_df["status"] == "CLOSED"].copy()
-    if closed.empty:
-        return []
-    closed["pnl"] = pd.to_numeric(closed["pnl"], errors="coerce").fillna(0.0)
-    closed["pnl_pct"] = pd.to_numeric(closed["pnl_pct"], errors="coerce").fillna(0.0)
-
+    by_strat: dict[str, list[dict]] = {}
+    for e in events:
+        by_strat.setdefault(e["strategy_name"] or "-", []).append(e)
     rows: list[dict] = []
-    for strat, grp in closed.groupby("strategy_name"):
-        wins = (grp["pnl"] > 0).sum()
+    for strat, items in by_strat.items():
+        wins = sum(1 for e in items if e["pnl"] > 0)
+        total_pnl = sum(e["pnl"] for e in items)
+        avg_pnl = total_pnl / len(items)
+        avg_pnl_pct = sum(e["pnl_pct"] for e in items) / len(items)
         rows.append({
             "strategy": strat,
-            "count": len(grp),
-            "wins": int(wins),
-            "win_rate": float(wins) / len(grp) * 100,
-            "total_pnl": float(grp["pnl"].sum()),
-            "avg_pnl": float(grp["pnl"].mean()),
-            "avg_pnl_pct": float(grp["pnl_pct"].mean()),
+            "count": len(items),
+            "wins": wins,
+            "win_rate": wins / len(items) * 100,
+            "total_pnl": total_pnl,
+            "avg_pnl": avg_pnl,
+            "avg_pnl_pct": avg_pnl_pct,
         })
     rows.sort(key=lambda r: r["total_pnl"], reverse=True)
     return rows
@@ -171,30 +256,32 @@ def render_open_table(open_df: pd.DataFrame, latest_date: str) -> str:
     )
 
 
-def render_closed_table(closed_df: pd.DataFrame) -> str:
-    if closed_df.empty:
+def render_closed_table(events: list[dict]) -> str:
+    if not events:
         return "<p class='empty'>決済済みトレードはありません</p>"
     rows = []
-    for _, r in closed_df.iterrows():
-        pnl = _safe_num(r.get("pnl"))
-        pnl_pct = _safe_num(r.get("pnl_pct"))
+    for e in events:
+        pnl = e["pnl"]
+        pnl_pct = e["pnl_pct"]
+        kind_cls = "kind-partial" if e["kind"] == "部分" else "kind-full"
         rows.append(
             f"<tr>"
-            f"<td>{r['ticker']}</td>"
-            f"<td class='num'>{int(_safe_num(r.get('quantity')))}</td>"
-            f"<td class='num'>${_safe_num(r.get('entry_price')):,.2f}</td>"
-            f"<td class='num'>${_safe_num(r.get('exit_price')):,.2f}</td>"
+            f"<td>{e['ticker']}</td>"
+            f"<td><span class='kind {kind_cls}'>{e['kind']}</span></td>"
+            f"<td class='num'>{e['quantity']}</td>"
+            f"<td class='num'>${e['entry_price']:,.2f}</td>"
+            f"<td class='num'>${e['exit_price']:,.2f}</td>"
             f"<td class='num {_cls(pnl)}'>{_fmt_money(pnl, sign=True)}</td>"
             f"<td class='num {_cls(pnl_pct)}'>{pnl_pct:+.2f}%</td>"
-            f"<td>{r.get('strategy_name', '-')}</td>"
-            f"<td>{r['entry_date']}</td>"
-            f"<td>{r['exit_date']}</td>"
+            f"<td>{e['strategy_name']}</td>"
+            f"<td>{e['entry_date']}</td>"
+            f"<td>{e['exit_date']}</td>"
             f"</tr>"
         )
     return (
         "<table class='tbl'>"
         "<thead><tr>"
-        "<th>銘柄</th><th>株数</th><th>建値</th><th>決済値</th>"
+        "<th>銘柄</th><th>区分</th><th>株数</th><th>建値</th><th>決済値</th>"
         "<th>損益</th><th>損益率</th><th>戦略</th><th>建玉日</th><th>決済日</th>"
         "</tr></thead><tbody>"
         + "".join(rows)
@@ -229,10 +316,9 @@ def render_strategy_table(perf: list[dict]) -> str:
     )
 
 
-def build_chart_data(dfs: dict[str, pd.DataFrame]) -> dict:
+def build_chart_data(dfs: dict[str, pd.DataFrame], events: list[dict]) -> dict:
     portfolio = dfs["portfolio_snapshots"]
     market = dfs["market_conditions"]
-    trades = dfs["trade_log"]
 
     chart: dict = {"equity": None, "market": None, "ticker_pnl": None}
 
@@ -253,15 +339,15 @@ def build_chart_data(dfs: dict[str, pd.DataFrame]) -> dict:
             "trend": m["sp500_trend"].astype(str).tolist(),
         }
 
-    if not trades.empty:
-        closed = trades[trades["status"] == "CLOSED"].copy()
-        if not closed.empty:
-            closed["pnl"] = pd.to_numeric(closed["pnl"], errors="coerce").fillna(0.0)
-            grp = closed.groupby("ticker")["pnl"].sum().sort_values()
-            chart["ticker_pnl"] = {
-                "tickers": grp.index.tolist(),
-                "pnl": [float(v) for v in grp.tolist()],
-            }
+    if events:
+        agg: dict[str, float] = {}
+        for e in events:
+            agg[e["ticker"]] = agg.get(e["ticker"], 0.0) + e["pnl"]
+        sorted_items = sorted(agg.items(), key=lambda kv: kv[1])
+        chart["ticker_pnl"] = {
+            "tickers": [k for k, _ in sorted_items],
+            "pnl": [float(v) for _, v in sorted_items],
+        }
 
     return chart
 
@@ -294,6 +380,9 @@ HTML_TEMPLATE = """<!DOCTYPE html>
   .tbl tbody tr:hover{background:rgba(95,163,208,.06)}
   .empty{color:var(--sub);padding:12px;text-align:center;font-style:italic}
   .chart{width:100%;height:340px}
+  .kind{display:inline-block;padding:1px 8px;border-radius:4px;font-size:.72rem;letter-spacing:.04em}
+  .kind-full{background:rgba(95,163,208,.18);color:#9ec6e0}
+  .kind-partial{background:rgba(200,168,74,.18);color:#d6bb6c}
 </style>
 </head>
 <body>
@@ -382,14 +471,16 @@ if (CHART_DATA.market) {
 """
 
 
-def render_html(dfs: dict[str, pd.DataFrame], summary: dict, strategy_perf: list[dict]) -> str:
+def render_html(
+    dfs: dict[str, pd.DataFrame],
+    summary: dict,
+    strategy_perf: list[dict],
+    events: list[dict],
+) -> str:
     trades = dfs["trade_log"]
     open_df = trades[trades["status"] == "OPEN"].copy() if not trades.empty else pd.DataFrame()
-    closed_df = trades[trades["status"] == "CLOSED"].copy() if not trades.empty else pd.DataFrame()
-    if not closed_df.empty:
-        closed_df = closed_df.sort_values("exit_date", ascending=False)
 
-    chart_json = json.dumps(build_chart_data(dfs), ensure_ascii=False)
+    chart_json = json.dumps(build_chart_data(dfs, events), ensure_ascii=False)
 
     html = HTML_TEMPLATE
     replacements = {
@@ -410,7 +501,7 @@ def render_html(dfs: dict[str, pd.DataFrame], summary: dict, strategy_perf: list
         "__AVG_WIN__": _fmt_money(summary["avg_win"], sign=True) if summary["avg_win"] else "-",
         "__AVG_LOSS__": _fmt_money(summary["avg_loss"], sign=True) if summary["avg_loss"] else "-",
         "__OPEN_TABLE__": render_open_table(open_df, summary["latest_date"]),
-        "__CLOSED_TABLE__": render_closed_table(closed_df),
+        "__CLOSED_TABLE__": render_closed_table(events),
         "__STRATEGY_TABLE__": render_strategy_table(strategy_perf),
         "__CHART_JSON__": chart_json,
     }
@@ -427,9 +518,11 @@ def main() -> None:
     if all(df.empty for df in dfs.values()):
         raise SystemExit(f"CSV が空です: {CSV_DIR}\nVPS で `bash scripts/export_db_csv.sh` を実行してから同期してください。")
 
-    summary = compute_summary(dfs)
-    strategy_perf = compute_strategy_perf(dfs["trade_log"])
-    html = render_html(dfs, summary, strategy_perf)
+    partials = extract_partial_exits(dfs["trade_log"], dfs["orders"])
+    events = build_realized_events(dfs["trade_log"], partials)
+    summary = compute_summary(dfs, events)
+    strategy_perf = compute_strategy_perf(events)
+    html = render_html(dfs, summary, strategy_perf, events)
 
     OUTPUT.parent.mkdir(parents=True, exist_ok=True)
     OUTPUT.write_text(html, encoding="utf-8")
