@@ -301,6 +301,17 @@ except Exception as e:
     python3 scripts/simulate.py "$@"
     ;;
 
+  reconcile)
+    DAYS="${2:-1}"
+    shift || true
+    shift || true
+    EXTRA_ARGS="$@"
+    echo "=== 約定確認 (過去 ${DAYS} 日分) ==="
+    cd "$PROJECT_DIR"
+    if [ -d ".venv" ]; then source .venv/bin/activate; fi
+    python scripts/reconcile_fills.py --days "${DAYS}" ${EXTRA_ARGS}
+    ;;
+
   deploy)
     echo "=== デプロイ（最新コード取得 & セットアップ） ==="
     cd "$PROJECT_DIR"
@@ -336,6 +347,7 @@ except Exception as e:
     echo "  check      importテスト（パッケージ不足の検出）"
     echo "  fetch [銘柄] yfinanceデータ取得テスト（デフォルト: AAPL）"
     echo "  simulate   バックテスト実行（過去データでシミュレーション）"
+    echo "  reconcile [日数] [--dry-run]  約定確認: moomoo の実約定で DB を更新（デフォルト1日）"
     echo "  deploy     GitHubから最新コード取得 & セットアップ"
     echo ""
     echo "時刻の目安 (UTC → JST):"
