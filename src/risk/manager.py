@@ -16,6 +16,38 @@ class TradeApproval:
     reason: str
 
 
+def _open_trade_tickers() -> set[str]:
+    """trade_log で OPEN 状態のティッカー集合（自動売買管理下にある銘柄）を返す。"""
+    from sqlalchemy import select
+
+    from src.models.base import get_session
+    from src.models.trade import TradeLog
+
+    with get_session() as session:
+        rows = session.execute(
+            select(TradeLog.ticker).where(TradeLog.status == "OPEN")
+        ).scalars().all()
+    return {t.upper() for t in rows}
+
+
+def _count_managed_positions(positions: list[dict]) -> int:
+    """ポジション数を集計する。
+
+    ignored_tickers にあるティッカーは「自動売買管理下にある（trade_log に OPEN レコードがある）」
+    場合のみカウントする。純粋に保有しているだけ（キャンペーン取得株など）は枠を消費しない。
+    """
+    ignored = {t.upper() for t in settings.ignored_tickers}
+    managed = _open_trade_tickers() if ignored else set()
+
+    count = 0
+    for p in positions:
+        ticker = p["ticker"].replace("US.", "").upper()
+        if ticker in ignored and ticker not in managed:
+            continue
+        count += 1
+    return count
+
+
 def _regime_risk_multiplier(market_condition: dict | None) -> float:
     """市場レジームに応じてリスク量を調整する乗数を返す。
 
@@ -69,7 +101,9 @@ def approve_trade(
         return TradeApproval(approved=True, quantity=0, reason="Exit signal approved")
 
     # Rule 1: Max positions
-    current_positions = len(account.positions)
+    # ignored_tickers のうち trade_log に OPEN レコードがない銘柄（純キャンペーン株等）は
+    # 枠を消費しない。システムが買い増ししたら trade_log 経由でカウント対象に戻る。
+    current_positions = _count_managed_positions(account.positions)
     if current_positions >= settings.max_positions:
         return TradeApproval(
             approved=False,

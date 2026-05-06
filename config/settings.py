@@ -1,5 +1,8 @@
 """アプリケーション設定（.envファイルから環境変数を読み込み）"""
-from pydantic_settings import BaseSettings
+from typing import Annotated
+
+from pydantic import field_validator
+from pydantic_settings import BaseSettings, NoDecode
 
 
 class Settings(BaseSettings):
@@ -23,6 +26,21 @@ class Settings(BaseSettings):
     risk_per_trade_pct: float = 0.01        # 1トレードあたりのリスク（資産の1%）
     max_portfolio_exposure_pct: float = 0.90  # ポートフォリオ全体のエクスポージャー上限（90%）
     daily_loss_limit_pct: float = 0.03      # 日次損失上限（3%超で新規エントリー停止）
+
+    # 自動売買のポジション数カウントから除外するティッカー（キャンペーン取得株など、
+    # 保有しているがシステム管理下ではない銘柄）。
+    # ただし、システム自身が新規エントリーして trade_log に OPEN レコードを持つ場合は
+    # 通常通りカウントされ、重複買い増しを防ぐ。
+    # .env では カンマ区切りで指定: IGNORED_TICKERS=PAYP,NVDA,MSFT
+    # NoDecode: pydantic-settings の自動 JSON パースを抑止し、field_validator で CSV を解析する
+    ignored_tickers: Annotated[list[str], NoDecode] = []
+
+    @field_validator("ignored_tickers", mode="before")
+    @classmethod
+    def _parse_ignored_tickers(cls, v):
+        if isinstance(v, str):
+            return [t.strip().upper() for t in v.split(",") if t.strip()]
+        return v
 
     # データベース接続
     database_url: str = "postgresql://autotrd:password@localhost:5432/autotrd"
