@@ -334,7 +334,7 @@ def build_chart_data(dfs: dict[str, pd.DataFrame], events: list[dict]) -> dict:
         m = market.sort_values("date").reset_index(drop=True)
         chart["market"] = {
             "x": m["date"].astype(str).tolist(),
-            "vix": [_safe_num(v) for v in m["vix_level"].tolist()],
+            "vix": [round(_safe_num(v), 2) for v in m["vix_level"].tolist()],
             "regime": m["regime"].astype(str).tolist(),
             "trend": m["sp500_trend"].astype(str).tolist(),
         }
@@ -461,7 +461,7 @@ if (CHART_DATA.ticker_pnl) {
 if (CHART_DATA.market) {
   Plotly.newPlot('market-chart', [
     { x: CHART_DATA.market.x, y: CHART_DATA.market.vix, name: 'VIX', type: 'scatter', mode: 'lines+markers', line: { color: '#c8a84a' }, text: CHART_DATA.market.regime, hovertemplate: '%{x}<br>VIX %{y:.1f}<br>regime %{text}<extra></extra>' },
-  ], layoutBase, { displayModeBar: false, responsive: true });
+  ], { ...layoutBase, yaxis: { ...layoutBase.yaxis, type: 'linear' } }, { displayModeBar: false, responsive: true });
 } else {
   document.getElementById('market-chart').innerHTML = '<p class="empty">market_conditions データがありません</p>';
 }
