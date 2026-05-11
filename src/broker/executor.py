@@ -1,7 +1,6 @@
 """注文執行（moomoo APIへの発注・トレードログの記録・DRY_RUNモード対応）"""
 from __future__ import annotations
 
-import time
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FuturesTimeoutError
 from datetime import datetime
@@ -11,9 +10,6 @@ from src.models.base import get_session
 from src.models.trade import Order, TradeLog
 from src.strategy.base import Signal
 from src.utils.logger import logger
-
-FILL_POLL_INTERVAL = 2   # seconds between polls
-FILL_POLL_TIMEOUT = 60   # max wait for fill confirmation
 
 
 def place_order(signal: Signal, quantity: int, strategy_name: str = "unknown") -> Order:
@@ -53,6 +49,9 @@ def place_order(signal: Signal, quantity: int, strategy_name: str = "unknown") -
             return order
 
         # Submit to moomoo
+        # 約定確認は scripts/reconcile_fills.py（systemd timer で米国市場クローズ後に起動）が
+        # 別途行うため、ここでは SUBMITTED で確定する。daily run の発注タイミング(22:00 JST)では
+        # 米国市場が開く前で寄付き約定を即時確認できないため、ポーリングは不要。
         try:
             broker_order_id = _submit_to_moomoo(signal, quantity)
             order.broker_order_id = broker_order_id
@@ -61,13 +60,6 @@ def place_order(signal: Signal, quantity: int, strategy_name: str = "unknown") -
                 f"Order submitted: {signal.action} {quantity}x {signal.ticker} "
                 f"(broker_id={broker_order_id})"
             )
-            trd_env = "SIMULATE" if settings.moomoo_trade_env == "SIMULATE" else "REAL"
-            filled_price = _poll_for_fill(broker_order_id, trd_env)
-            if filled_price is not None:
-                order.filled_price = filled_price
-                order.filled_at = datetime.utcnow()
-                order.status = "FILLED"
-                logger.info(f"Order filled: {signal.action} {quantity}x {signal.ticker} @ ${filled_price:.2f}")
         except Exception as e:
             order.status = "FAILED"
             logger.error(f"Order failed for {signal.ticker}: {e}")
@@ -147,40 +139,6 @@ def _submit_to_moomoo(signal: Signal, quantity: int) -> str:
             logger.error(err)
             _notify_opend_error(err)
             raise RuntimeError(err)
-
-
-def _poll_for_fill(broker_order_id: str, trd_env_str: str) -> float | None:
-    """Poll moomoo until MARKET order is fully filled. Returns dealt_avg_price or None on timeout."""
-    try:
-        from moomoo import OpenSecTradeContext, SecurityFirm, TrdEnv, TrdMarket
-    except ImportError:
-        return None
-
-    trd_env = TrdEnv.SIMULATE if trd_env_str == "SIMULATE" else TrdEnv.REAL
-
-    ctx = OpenSecTradeContext(
-        host=settings.moomoo_host,
-        port=settings.moomoo_port,
-        filter_trdmarket=TrdMarket.US,
-        security_firm=SecurityFirm.FUTUJP,
-    )
-    try:
-        for _ in range(FILL_POLL_TIMEOUT // FILL_POLL_INTERVAL):
-            ret, data = ctx.order_list_query(trd_env=trd_env, acc_id=settings.moomoo_acc_id)
-            if ret == 0 and not data.empty:
-                rows = data[data["order_id"].astype(str) == str(broker_order_id)]
-                if not rows.empty:
-                    row = rows.iloc[0]
-                    if str(row["order_status"]) == "FILLED_ALL":
-                        return float(row["dealt_avg_price"])
-            time.sleep(FILL_POLL_INTERVAL)
-    except Exception as e:
-        logger.error(f"Fill poll error for order {broker_order_id}: {e}")
-    finally:
-        ctx.close()
-
-    logger.warning(f"Fill poll timeout: order {broker_order_id} not confirmed filled within {FILL_POLL_TIMEOUT}s")
-    return None
 
 
 def _notify_opend_error(message: str) -> None:
