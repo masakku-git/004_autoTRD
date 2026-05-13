@@ -16,7 +16,7 @@ from src.data.screener import run_screening
 from src.models.base import get_session, init_db
 from src.models.portfolio import PortfolioSnapshot
 from src.notify.notifier import send_notification
-from src.risk.manager import approve_trade, check_daily_loss_limit
+from src.risk.manager import TradeApproval, approve_trade, check_daily_loss_limit
 from src.strategy.base import Signal
 from src.strategy.critic import evaluate_signal
 from src.strategy.registry import discover_strategies, get_strategy
@@ -51,13 +51,16 @@ def run_daily():
     # ポートフォリオのスナップショットをDBに保存（日次記録）
     _save_portfolio_snapshot(account)
 
-    # 前日比の損失が上限（3%）を超えていたら新規エントリーを停止
+    # 前日比の損失が上限（3%）を超えていたら新規エントリーのみを停止する。
+    # 売却ロジック（SL/段階TP/TP/最大保有期間/戦略固有exit/SELLシグナル）は
+    # ポジション保護のため通常通り動かす。
+    block_new_entries = False
     prev_snapshot = _get_previous_equity()
     if prev_snapshot > 0 and check_daily_loss_limit(account, prev_snapshot):
-        msg = "日次損失上限に到達 — 新規エントリーを停止します"
+        msg = "日次損失上限に到達 — 新規エントリーを停止します（売却は継続）"
         logger.warning(msg)
-        send_notification("取引停止", msg, level="warning")
-        return
+        send_notification("新規エントリー停止", msg, level="warning")
+        block_new_entries = True
 
     # --- Step 3: 市場環境の判定（S&P500トレンド・VIX・レジーム分類） ---
     market_condition = assess_market_condition()
@@ -248,6 +251,11 @@ def run_daily():
     # moomooへの残高反映タイムラグを考慮し、発注成功のたびに account.cash を手動で差し引く
     buy_signals.sort(key=lambda s: s.screen_score, reverse=True)
     for signal in buy_signals:
+        if block_new_entries:
+            risk_rejected_orders.append(
+                (signal, TradeApproval(approved=False, quantity=0, reason="日次損失上限到達のため新規エントリー停止"))
+            )
+            continue
         approval = approve_trade(signal, account, market_condition)
         if approval.approved and approval.quantity > 0:
             order = place_order(signal, approval.quantity, strategy_name=_find_strategy_name_for_signal(signal, strategies))
