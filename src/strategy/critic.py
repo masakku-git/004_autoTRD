@@ -142,7 +142,28 @@ def check_overextended_price(  # チェック4: 過度な値動き（高値追�
     pct_change_20d = (close.iloc[-1] / close.iloc[-21] - 1) * 100
 
     if signal.action == "BUY":
-        if pct_change_5d > 10:
+        # 段階厳罰化: 5日上昇率に応じてペナルティを増加
+        # +25%超 → penalty=1.0 で強制reject（高値掴み確実）
+        # 2026-05-12 INTC事例: 5日+25.4%上昇で承認→寄付き+4.87%ギャップアップで高値掴み
+        if pct_change_5d > 25:
+            objections.append(
+                Objection(
+                    check="overextended_price",
+                    penalty=1.0,
+                    reason=f"Price up {pct_change_5d:.1f}% in 5 days — "
+                    f"extreme run-up, hard reject (>25% threshold)",
+                )
+            )
+        elif pct_change_5d > 15:
+            objections.append(
+                Objection(
+                    check="overextended_price",
+                    penalty=0.40,
+                    reason=f"Price up {pct_change_5d:.1f}% in 5 days — "
+                    f"significantly overextended (>15% threshold)",
+                )
+            )
+        elif pct_change_5d > 10:
             objections.append(
                 Objection(
                     check="overextended_price",

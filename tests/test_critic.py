@@ -151,6 +151,41 @@ class TestOverextendedPrice:
         # Normal random walk should not trigger
         assert all(o.check != "overextended_price" or o.penalty < 0.25 for o in objections)
 
+    def test_extreme_spike_hard_reject(self, buy_signal, bull_market):
+        """5日で+25%超の急騰はpenalty=1.0で強制reject（INTC 2026-05-12事例の再現防止）"""
+        dates = pd.bdate_range("2024-01-01", periods=100)
+        close = np.full(100, 100.0)
+        # Last 5 days: spike up 26% (above 25% threshold)
+        close[-5:] = [105, 110, 117, 122, 126]
+        df = pd.DataFrame(
+            {
+                "Open": close - 0.5, "High": close + 1, "Low": close - 1,
+                "Close": close, "Volume": np.full(100, 2_000_000),
+            },
+            index=dates,
+        )
+        objections = check_overextended_price(buy_signal, df, bull_market)
+        assert len(objections) == 1
+        assert objections[0].penalty == 1.0
+        assert "hard reject" in objections[0].reason.lower()
+
+    def test_moderate_spike_heavy_penalty(self, buy_signal, bull_market):
+        """5日で+15〜25%の上昇はpenalty=0.40で強い減点"""
+        dates = pd.bdate_range("2024-01-01", periods=100)
+        close = np.full(100, 100.0)
+        # Last 5 days: spike up 18% (between 15% and 25%)
+        close[-5:] = [104, 108, 112, 115, 118]
+        df = pd.DataFrame(
+            {
+                "Open": close - 0.5, "High": close + 1, "Low": close - 1,
+                "Close": close, "Volume": np.full(100, 2_000_000),
+            },
+            index=dates,
+        )
+        objections = check_overextended_price(buy_signal, df, bull_market)
+        assert len(objections) == 1
+        assert objections[0].penalty == 0.40
+
 
 class TestRiskRewardRatio:
     def test_bad_ratio_penalized(self, bull_market):
