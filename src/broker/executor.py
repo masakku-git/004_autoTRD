@@ -188,52 +188,131 @@ def create_trade_log(
 def close_trade_log(
     ticker: str, exit_order: Order, exit_price: float
 ) -> None:
-    """Close an open trade log entry."""
+    """Close all OPEN trade log entries for this ticker.
+
+    同銘柄に複数のOPEN行が存在しても全件をCLOSEDに更新する（クラッシュ回避）。
+    各行は自身のentry_priceで個別にPnLを計算する。
+    """
     from sqlalchemy import select
 
     with get_session() as session:
-        trade = session.execute(
-            select(TradeLog).where(
-                TradeLog.ticker == ticker, TradeLog.status == "OPEN"
-            )
-        ).scalar_one_or_none()
+        trades = session.execute(
+            select(TradeLog)
+            .where(TradeLog.ticker == ticker, TradeLog.status == "OPEN")
+            .order_by(TradeLog.entry_date)
+        ).scalars().all()
 
-        if trade:
-            actual_exit_price = exit_order.filled_price or exit_price
+        if not trades:
+            return
+
+        if len(trades) > 1:
+            logger.warning(
+                f"close_trade_log: {ticker} has {len(trades)} OPEN rows — closing all"
+            )
+
+        actual_exit_price = exit_order.filled_price or exit_price
+        total_pnl = 0.0
+        total_qty = 0
+        for trade in trades:
             trade.exit_order_id = exit_order.id
             trade.exit_date = datetime.utcnow().date()
             trade.exit_price = actual_exit_price
             trade.pnl = (actual_exit_price - trade.entry_price) * trade.quantity
-            trade.pnl_pct = (actual_exit_price / trade.entry_price - 1) * 100 if trade.entry_price else 0
+            trade.pnl_pct = (
+                (actual_exit_price / trade.entry_price - 1) * 100
+                if trade.entry_price
+                else 0
+            )
             trade.status = "CLOSED"
-            session.commit()
+            total_pnl += trade.pnl
+            total_qty += trade.quantity
+
+        session.commit()
+
+        if len(trades) == 1:
+            t = trades[0]
             logger.info(
-                f"Trade closed: {ticker} PnL=${trade.pnl:.2f} ({trade.pnl_pct:.1f}%)"
+                f"Trade closed: {ticker} PnL=${t.pnl:.2f} ({t.pnl_pct:.1f}%)"
+            )
+        else:
+            logger.info(
+                f"Trade closed: {ticker} PnL=${total_pnl:.2f} total "
+                f"({len(trades)} rows, {total_qty} shares)"
             )
 
 
 def partial_close_trade_log(
     ticker: str, exit_order: Order, exit_price: float, sold_qty: int
 ) -> None:
-    """段階決済: 一部を売却してTradeLogを更新（CLOSEDにはしない）。"""
+    """段階決済: FIFOで sold_qty 株分の OPEN 行を消化（複数OPEN対応）。
+
+    - 古い行から順に消化し、qty が消化量以下の行は CLOSED に更新（行ごとPnL算出）。
+    - 最後に残った行が部分消化なら quantity を減らして OPEN を継続。
+    - 同銘柄の残OPEN行のTP1も全てクリアし、連続TP1発動を防ぐ。
+    """
     from sqlalchemy import select
 
     with get_session() as session:
-        trade = session.execute(
-            select(TradeLog).where(
-                TradeLog.ticker == ticker, TradeLog.status == "OPEN"
-            )
-        ).scalar_one_or_none()
+        trades = session.execute(
+            select(TradeLog)
+            .where(TradeLog.ticker == ticker, TradeLog.status == "OPEN")
+            .order_by(TradeLog.entry_date)
+        ).scalars().all()
 
-        if trade:
-            actual_exit_price = exit_order.filled_price or exit_price
-            partial_pnl = (actual_exit_price - trade.entry_price) * sold_qty
-            note = (
-                f"段階決済: {sold_qty}株 @ ${actual_exit_price:.2f}, "
-                f"PnL=${partial_pnl:.2f}"
+        if not trades:
+            return
+
+        if len(trades) > 1:
+            logger.warning(
+                f"partial_close_trade_log: {ticker} has {len(trades)} OPEN rows — FIFO consume"
             )
-            trade.quantity -= sold_qty
-            trade.take_profit_1 = None  # TP1消費済み
-            trade.notes = f"{trade.notes or ''}\n{note}".strip()
-            session.commit()
-            logger.info(f"Partial close: {ticker} {note}")
+
+        actual_exit_price = exit_order.filled_price or exit_price
+        remaining = sold_qty
+        total_pnl = 0.0
+
+        for trade in trades:
+            if remaining <= 0:
+                # 既に売り切った後の残OPEN行：TP1だけクリア
+                trade.take_profit_1 = None
+                continue
+            if trade.quantity <= remaining:
+                # 行を全消化 → CLOSED
+                qty_sold = trade.quantity
+                pnl = (actual_exit_price - trade.entry_price) * qty_sold
+                trade.exit_order_id = exit_order.id
+                trade.exit_date = datetime.utcnow().date()
+                trade.exit_price = actual_exit_price
+                trade.pnl = pnl
+                trade.pnl_pct = (
+                    (actual_exit_price / trade.entry_price - 1) * 100
+                    if trade.entry_price
+                    else 0
+                )
+                trade.status = "CLOSED"
+                note = (
+                    f"段階決済(全消化): {qty_sold}株 @ ${actual_exit_price:.2f}, "
+                    f"PnL=${pnl:.2f}"
+                )
+                trade.notes = f"{trade.notes or ''}\n{note}".strip()
+                total_pnl += pnl
+                remaining -= qty_sold
+            else:
+                # 行の一部を消化 → qty を減らして OPEN 継続
+                qty_sold = remaining
+                pnl = (actual_exit_price - trade.entry_price) * qty_sold
+                trade.quantity -= qty_sold
+                trade.take_profit_1 = None  # TP1消費済み
+                note = (
+                    f"段階決済(部分): {qty_sold}株 @ ${actual_exit_price:.2f}, "
+                    f"PnL=${pnl:.2f}"
+                )
+                trade.notes = f"{trade.notes or ''}\n{note}".strip()
+                total_pnl += pnl
+                remaining = 0
+
+        session.commit()
+        logger.info(
+            f"Partial close: {ticker} sold {sold_qty - remaining} shares, "
+            f"PnL=${total_pnl:.2f}"
+        )
