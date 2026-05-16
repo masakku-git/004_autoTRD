@@ -14,7 +14,6 @@ from src.broker.executor import close_trade_log, create_trade_log, partial_close
 from src.data.fetcher import get_ohlcv
 from src.data.screener import run_screening
 from src.models.base import get_session, init_db
-from src.models.portfolio import PortfolioSnapshot
 from src.notify.notifier import send_notification
 from src.risk.manager import TradeApproval, approve_trade, check_daily_loss_limit
 from src.strategy.base import Signal
@@ -48,8 +47,9 @@ def run_daily():
         f"cash=${account.cash:.2f}, positions={len(account.positions)}"
     )
 
-    # ポートフォリオのスナップショットをDBに保存（日次記録）
-    _save_portfolio_snapshot(account)
+    # ※ ポートフォリオのスナップショット保存は scripts/save_eod_snapshot.py に分離
+    #   （JST 13:00 では moomoo API が返す値が前 US 営業日の close のため、日付ラベルが
+    #   1営業日ずれる問題があった。EOD snapshot は土曜 JST 07:00 cron で別途記録する。）
 
     # 前日比の損失が上限（3%）を超えていたら新規エントリーのみを停止する。
     # 売却ロジック（SL/段階TP/TP/最大保有期間/戦略固有exit/SELLシグナル）は
@@ -333,31 +333,6 @@ def _get_open_trade_info(ticker: str) -> dict | None:
             "quantity": trade.quantity,
             "strategy_name": trade.strategy_name,
         }
-
-
-def _save_portfolio_snapshot(account) -> None:
-    from sqlalchemy import select
-
-    with get_session() as session:
-        existing = session.execute(
-            select(PortfolioSnapshot).where(PortfolioSnapshot.date == today_jst())
-        ).scalar_one_or_none()
-
-        if existing:
-            existing.total_equity = account.total_equity
-            existing.cash = account.cash
-            existing.positions_json = account.positions
-            existing.num_positions = len(account.positions)
-        else:
-            snapshot = PortfolioSnapshot(
-                date=today_jst(),
-                total_equity=account.total_equity,
-                cash=account.cash,
-                positions_json=account.positions,
-                num_positions=len(account.positions),
-            )
-            session.add(snapshot)
-        session.commit()
 
 
 def _get_previous_equity() -> float:
