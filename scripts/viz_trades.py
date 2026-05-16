@@ -446,7 +446,6 @@ function renderCards(s) {
     <div class="card"><div class="label">総資産 <span class="asof">(${asOf})</span></div><div class="value">${fmtMoney(s.totalEquity)}</div><div class="sub">現金 ${fmtMoney(s.cash)}</div></div>
     <div class="card"><div class="label">期間差額 (期首→期末)</div><div class="value ${cls(s.returnAbs)}">${fmtMoney(s.returnAbs, true)}</div><div class="sub">${diffSub}</div></div>
     <div class="card"><div class="label">期間リターン</div><div class="value ${cls(s.returnPct)}">${fmtPct(s.returnPct)}</div><div class="sub ${cls(s.returnPct)}">${fmtMoney(s.returnAbs, true)}</div></div>
-    <div class="card"><div class="label">保有ポジション <span class="asof">(${asOf})</span></div><div class="value">${s.numPositions}</div><div class="sub">OPEN件数 ${s.openCount}</div></div>
     <div class="card"><div class="label">累計実現損益</div><div class="value ${cls(s.totalPnl)}">${fmtMoney(s.totalPnl, true)}</div><div class="sub">決済 ${s.closedCount}件</div></div>
     <div class="card"><div class="label">勝率</div><div class="value">${s.closedCount ? s.winRate.toFixed(1) + '%' : '-'}</div><div class="sub">平均勝 ${s.avgWin ? fmtMoney(s.avgWin, true) : '-'} / 平均負 ${s.avgLoss ? fmtMoney(s.avgLoss, true) : '-'}</div></div>
   `;
