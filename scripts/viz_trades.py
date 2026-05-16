@@ -275,7 +275,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 <script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
 <style>
   *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
-  :root{--bg:#f5efe6;--card:#faf6ed;--border:#e6dcc8;--text:#3a3530;--sub:#8a8170;--head:#4a4238;--accent:#7a8b5c;--pos:#6b8e5a;--neg:#b06848;--gold:#c4a253}
+  :root{--bg:#f5efe6;--card:#faf6ed;--border:#e6dcc8;--text:#3a3530;--sub:#8a8170;--head:#4a4238;--accent:#7a8b5c;--pos:#6b8e5a;--neg:#c0392b;--gold:#c4a253}
   body{background:var(--bg);color:var(--text);font-family:'SF Pro Text','Hiragino Sans','Meiryo',system-ui,sans-serif;line-height:1.6;padding:24px;font-size:14px}
   h1{font-size:1.6rem;color:var(--head);margin-bottom:12px;font-weight:600}
   h2{font-size:1.15rem;color:var(--head);margin:0 0 12px;padding-left:10px;border-left:3px solid var(--accent);font-weight:600}
@@ -359,7 +359,7 @@ const GEN_AT = "__GEN_AT__";
 
 const COLORS = {
   bg: '#faf6ed', text: '#3a3530', grid: '#e6dcc8', line: '#d6c9b0',
-  accent: '#7a8b5c', gold: '#c4a253', pos: '#6b8e5a', neg: '#b06848',
+  accent: '#7a8b5c', gold: '#c4a253', pos: '#6b8e5a', neg: '#c0392b',
 };
 
 const layoutBase = {
