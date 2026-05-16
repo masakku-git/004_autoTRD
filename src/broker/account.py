@@ -60,23 +60,32 @@ def get_account_info() -> AccountInfo:
                     trd_env=trd_env,
                     acc_id=settings.moomoo_acc_id,
                 )
-                positions = []
+                positions: list[dict] = []
+                residual_mv = 0.0
                 if ret == 0 and not pos_df.empty:
                     for _, row in pos_df.iterrows():
+                        qty = int(row["qty"])
+                        mv = float(row["market_val"])
+                        if qty <= 0:
+                            # 端株（fractional shares／株式分割や配当再投資の残骸）。
+                            # moomoo 画面の「資産総額」はこれらを除外して表示するため、
+                            # 同じ基準に合わせて total_assets / market_val から差し引く。
+                            residual_mv += mv
+                            continue
                         positions.append(
                             {
                                 "ticker": row["code"],
-                                "qty": int(row["qty"]),
+                                "qty": qty,
                                 "avg_price": float(row["cost_price"]),
-                                "market_value": float(row["market_val"]),
+                                "market_value": mv,
                                 "pnl": float(row["pl_val"]),
                             }
                         )
 
                 return AccountInfo(
-                    total_equity=total_equity,
+                    total_equity=total_equity - residual_mv,
                     cash=cash,
-                    market_value=market_value,
+                    market_value=market_value - residual_mv,
                     positions=positions,
                 )
             finally:
