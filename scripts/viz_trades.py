@@ -158,6 +158,10 @@ def _recompute_snapshot(row: pd.Series) -> dict:
         positions = json.loads(pj)
     except (TypeError, ValueError, json.JSONDecodeError):
         return {"total_equity": raw_total, "cash": cash, "num_positions": raw_num}
+    if not positions:
+        # 空配列は「ポジション詳細なし」を意味する（backfill 由来）。
+        # raw_total をそのまま返し、cash / num_positions は既存値を保持。
+        return {"total_equity": raw_total, "cash": cash, "num_positions": raw_num}
     real_count = 0
     residual_mv = 0.0
     for p in positions:
