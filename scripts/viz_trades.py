@@ -3,7 +3,12 @@
 
 使い方:
     python3 scripts/viz_trades.py
+    python3 scripts/viz_trades.py --start 2026-04-01 --end 2026-05-15
     open data/dashboard.html
+
+CLI で渡した --start / --end は、ブラウザの日付ピッカーの初期値に反映される。
+画面上で日付を変更すれば、その場でカード/表/グラフがリフィルタされる
+（クライアント側で再計算するため再生成は不要）。
 
 依存: pandas のみ（Plotly は CDN 経由で読込）
 入力: data/csv_export/*.csv
@@ -11,6 +16,7 @@
 """
 from __future__ import annotations
 
+import argparse
 import json
 import math
 import re
@@ -61,12 +67,7 @@ def _safe_num(v, default=0.0):
 
 
 def extract_partial_exits(trades_df: pd.DataFrame, orders_df: pd.DataFrame) -> list[dict]:
-    """trade_log の notes フィールドから段階決済を抽出。
-
-    DBスキーマ上、段階決済の実現損益は trade_log.notes にテキストで記録される
-    （pnl 列は全数決済時のみ書き込み）。本関数はそれを構造化データに変換する。
-    可能であれば orders.csv の SELL 注文と銘柄+数量で突き合わせて exit_date を補完する。
-    """
+    """trade_log.notes から段階決済を抽出（exit_date は orders から補完）。"""
     if trades_df.empty:
         return []
 
@@ -137,219 +138,100 @@ def build_realized_events(trades_df: pd.DataFrame, partials: list[dict]) -> list
                 "exit_date": str(r["exit_date"]) if pd.notna(r.get("exit_date")) else "-",
                 "kind": "全数",
             })
-    events.sort(key=lambda e: (e["exit_date"] or "0000-00-00"), reverse=True)
     return events
 
 
-def compute_summary(dfs: dict[str, pd.DataFrame], events: list[dict]) -> dict:
-    portfolio = dfs["portfolio_snapshots"]
-    trades = dfs["trade_log"]
+def _recompute_snapshot(row: pd.Series) -> dict:
+    """qty=0 の残骸（端株）を除外して total_equity / num_positions を再計算。
 
-    s: dict = {
-        "total_equity": 0.0, "cash": 0.0, "num_positions": 0,
-        "start_equity": 0.0, "return_abs": 0.0, "return_pct": 0.0,
-        "open_count": 0, "closed_count": 0, "total_pnl": 0.0,
-        "win_rate": 0.0, "avg_win": 0.0, "avg_loss": 0.0,
-        "latest_date": "-", "first_date": "-",
+    端株 (株式分割や配当再投資の残り) は moomoo API の total_assets には含まれるが
+    画面の「資産総額」では除外されているため、記録済みスナップショットも同じ基準で
+    補正する。新規記録は account.py 側で既に補正済みなので本処理は冪等。
+    """
+    raw_total = _safe_num(row.get("total_equity"))
+    cash = _safe_num(row.get("cash"))
+    raw_num = int(_safe_num(row.get("num_positions")))
+    pj = row.get("positions_json")
+    if pd.isna(pj) or not str(pj).strip():
+        return {"total_equity": raw_total, "cash": cash, "num_positions": raw_num}
+    try:
+        positions = json.loads(pj)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return {"total_equity": raw_total, "cash": cash, "num_positions": raw_num}
+    real_count = 0
+    residual_mv = 0.0
+    for p in positions:
+        try:
+            qty = int(p.get("qty") or 0)
+        except (TypeError, ValueError):
+            qty = 0
+        if qty > 0:
+            real_count += 1
+        else:
+            residual_mv += _safe_num(p.get("market_value"))
+    return {
+        "total_equity": round(raw_total - residual_mv, 2),
+        "cash": round(cash, 2),
+        "num_positions": real_count,
     }
 
-    if not portfolio.empty:
-        p = portfolio.sort_values("date").reset_index(drop=True)
-        s["latest_date"] = str(p.iloc[-1]["date"])
-        s["first_date"] = str(p.iloc[0]["date"])
-        s["total_equity"] = _safe_num(p.iloc[-1]["total_equity"])
-        s["cash"] = _safe_num(p.iloc[-1]["cash"])
-        s["num_positions"] = int(_safe_num(p.iloc[-1]["num_positions"]))
-        s["start_equity"] = _safe_num(p.iloc[0]["total_equity"])
-        if s["start_equity"] > 0:
-            s["return_abs"] = s["total_equity"] - s["start_equity"]
-            s["return_pct"] = (s["total_equity"] / s["start_equity"] - 1) * 100
 
+def build_raw_data(dfs: dict[str, pd.DataFrame], events: list[dict]) -> dict:
+    """ブラウザに渡す全データ（フィルタ前）を組み立てる。"""
+    portfolio_rows: list[dict] = []
+    if not dfs["portfolio_snapshots"].empty:
+        p = dfs["portfolio_snapshots"].sort_values("date").reset_index(drop=True)
+        for _, r in p.iterrows():
+            corr = _recompute_snapshot(r)
+            portfolio_rows.append({
+                "date": str(r["date"]),
+                "total_equity": corr["total_equity"],
+                "cash": corr["cash"],
+                "num_positions": corr["num_positions"],
+            })
+
+    market_rows: list[dict] = []
+    if not dfs["market_conditions"].empty:
+        m = dfs["market_conditions"].sort_values("date").reset_index(drop=True)
+        for _, r in m.iterrows():
+            market_rows.append({
+                "date": str(r["date"]),
+                "vix": round(_safe_num(r.get("vix_level")), 2),
+                "regime": str(r.get("regime", "-")),
+                "trend": str(r.get("sp500_trend", "-")),
+            })
+
+    open_positions: list[dict] = []
+    trades = dfs["trade_log"]
     if not trades.empty:
-        s["open_count"] = int((trades["status"] == "OPEN").sum())
+        open_df = trades[trades["status"] == "OPEN"]
+        for _, r in open_df.iterrows():
+            entry_d = pd.to_datetime(r.get("entry_date"), errors="coerce")
+            entry_date = entry_d.strftime("%Y-%m-%d") if pd.notna(entry_d) else "-"
+            open_positions.append({
+                "ticker": str(r["ticker"]),
+                "quantity": int(_safe_num(r.get("quantity"))),
+                "entry_price": _safe_num(r.get("entry_price")),
+                "stop_loss": _safe_num(r.get("stop_loss")),
+                "take_profit": _safe_num(r.get("take_profit")),
+                "strategy_name": str(r.get("strategy_name", "-")),
+                "entry_date": entry_date,
+            })
 
-    if events:
-        s["closed_count"] = len(events)
-        s["total_pnl"] = float(sum(e["pnl"] for e in events))
-        wins = [e["pnl"] for e in events if e["pnl"] > 0]
-        losses = [e["pnl"] for e in events if e["pnl"] <= 0]
-        s["win_rate"] = len(wins) / len(events) * 100
-        s["avg_win"] = sum(wins) / len(wins) if wins else 0.0
-        s["avg_loss"] = sum(losses) / len(losses) if losses else 0.0
+    all_dates: list[str] = []
+    all_dates += [r["date"] for r in portfolio_rows]
+    all_dates += [r["date"] for r in market_rows]
+    all_dates += [e["exit_date"] for e in events if e.get("exit_date") and e["exit_date"] != "-"]
+    all_dates_sorted = sorted({d for d in all_dates if d})
 
-    return s
-
-
-def compute_strategy_perf(events: list[dict]) -> list[dict]:
-    if not events:
-        return []
-    by_strat: dict[str, list[dict]] = {}
-    for e in events:
-        by_strat.setdefault(e["strategy_name"] or "-", []).append(e)
-    rows: list[dict] = []
-    for strat, items in by_strat.items():
-        wins = sum(1 for e in items if e["pnl"] > 0)
-        total_pnl = sum(e["pnl"] for e in items)
-        avg_pnl = total_pnl / len(items)
-        avg_pnl_pct = sum(e["pnl_pct"] for e in items) / len(items)
-        rows.append({
-            "strategy": strat,
-            "count": len(items),
-            "wins": wins,
-            "win_rate": wins / len(items) * 100,
-            "total_pnl": total_pnl,
-            "avg_pnl": avg_pnl,
-            "avg_pnl_pct": avg_pnl_pct,
-        })
-    rows.sort(key=lambda r: r["total_pnl"], reverse=True)
-    return rows
-
-
-def _fmt_money(v: float, sign: bool = False) -> str:
-    if v is None or (isinstance(v, float) and math.isnan(v)):
-        return "-"
-    sign_part = "+" if (sign and v >= 0) else ""
-    return f"{sign_part}${v:,.2f}"
-
-
-def _cls(v: float) -> str:
-    if v is None or (isinstance(v, float) and math.isnan(v)):
-        return ""
-    return "positive" if v > 0 else ("negative" if v < 0 else "")
-
-
-def render_open_table(open_df: pd.DataFrame, latest_date: str) -> str:
-    if open_df.empty:
-        return "<p class='empty'>保有中のポジションはありません</p>"
-    rows = []
-    for _, r in open_df.iterrows():
-        entry_d = pd.to_datetime(r["entry_date"]).date() if pd.notna(r["entry_date"]) else None
-        try:
-            latest = pd.to_datetime(latest_date).date()
-            hold_days = (latest - entry_d).days if entry_d else "-"
-        except Exception:
-            hold_days = "-"
-        entry_price = _safe_num(r.get("entry_price"))
-        qty = int(_safe_num(r.get("quantity")))
-        cost = entry_price * qty
-        rows.append(
-            f"<tr>"
-            f"<td>{r['ticker']}</td>"
-            f"<td class='num'>{qty}</td>"
-            f"<td class='num'>${entry_price:,.2f}</td>"
-            f"<td class='num'>${cost:,.2f}</td>"
-            f"<td class='num'>${_safe_num(r.get('stop_loss')):,.2f}</td>"
-            f"<td class='num'>${_safe_num(r.get('take_profit')):,.2f}</td>"
-            f"<td>{r.get('strategy_name', '-')}</td>"
-            f"<td>{r['entry_date']}</td>"
-            f"<td class='num'>{hold_days}</td>"
-            f"</tr>"
-        )
-    return (
-        "<table class='tbl'>"
-        "<thead><tr>"
-        "<th>銘柄</th><th>株数</th><th>取得単価</th><th>取得額</th>"
-        "<th>SL</th><th>TP</th><th>戦略</th><th>建玉日</th><th>保有日数</th>"
-        "</tr></thead><tbody>"
-        + "".join(rows)
-        + "</tbody></table>"
-    )
-
-
-def render_closed_table(events: list[dict]) -> str:
-    if not events:
-        return "<p class='empty'>決済済みトレードはありません</p>"
-    rows = []
-    for e in events:
-        pnl = e["pnl"]
-        pnl_pct = e["pnl_pct"]
-        kind_cls = "kind-partial" if e["kind"] == "部分" else "kind-full"
-        rows.append(
-            f"<tr>"
-            f"<td>{e['ticker']}</td>"
-            f"<td><span class='kind {kind_cls}'>{e['kind']}</span></td>"
-            f"<td class='num'>{e['quantity']}</td>"
-            f"<td class='num'>${e['entry_price']:,.2f}</td>"
-            f"<td class='num'>${e['exit_price']:,.2f}</td>"
-            f"<td class='num {_cls(pnl)}'>{_fmt_money(pnl, sign=True)}</td>"
-            f"<td class='num {_cls(pnl_pct)}'>{pnl_pct:+.2f}%</td>"
-            f"<td>{e['strategy_name']}</td>"
-            f"<td>{e['entry_date']}</td>"
-            f"<td>{e['exit_date']}</td>"
-            f"</tr>"
-        )
-    return (
-        "<table class='tbl'>"
-        "<thead><tr>"
-        "<th>銘柄</th><th>区分</th><th>株数</th><th>建値</th><th>決済値</th>"
-        "<th>損益</th><th>損益率</th><th>戦略</th><th>建玉日</th><th>決済日</th>"
-        "</tr></thead><tbody>"
-        + "".join(rows)
-        + "</tbody></table>"
-    )
-
-
-def render_strategy_table(perf: list[dict]) -> str:
-    if not perf:
-        return "<p class='empty'>戦略別の決済データはまだありません</p>"
-    rows = []
-    for r in perf:
-        rows.append(
-            f"<tr>"
-            f"<td>{r['strategy']}</td>"
-            f"<td class='num'>{r['count']}</td>"
-            f"<td class='num'>{r['wins']}</td>"
-            f"<td class='num'>{r['win_rate']:.1f}%</td>"
-            f"<td class='num {_cls(r['total_pnl'])}'>{_fmt_money(r['total_pnl'], sign=True)}</td>"
-            f"<td class='num {_cls(r['avg_pnl'])}'>{_fmt_money(r['avg_pnl'], sign=True)}</td>"
-            f"<td class='num {_cls(r['avg_pnl_pct'])}'>{r['avg_pnl_pct']:+.2f}%</td>"
-            f"</tr>"
-        )
-    return (
-        "<table class='tbl'>"
-        "<thead><tr>"
-        "<th>戦略</th><th>件数</th><th>勝</th><th>勝率</th>"
-        "<th>累計損益</th><th>平均損益</th><th>平均損益率</th>"
-        "</tr></thead><tbody>"
-        + "".join(rows)
-        + "</tbody></table>"
-    )
-
-
-def build_chart_data(dfs: dict[str, pd.DataFrame], events: list[dict]) -> dict:
-    portfolio = dfs["portfolio_snapshots"]
-    market = dfs["market_conditions"]
-
-    chart: dict = {"equity": None, "market": None, "ticker_pnl": None}
-
-    if not portfolio.empty:
-        p = portfolio.sort_values("date").reset_index(drop=True)
-        chart["equity"] = {
-            "x": p["date"].astype(str).tolist(),
-            "equity": [_safe_num(v) for v in p["total_equity"].tolist()],
-            "cash": [_safe_num(v) for v in p["cash"].tolist()],
-        }
-
-    if not market.empty:
-        m = market.sort_values("date").reset_index(drop=True)
-        chart["market"] = {
-            "x": m["date"].astype(str).tolist(),
-            "vix": [round(_safe_num(v), 2) for v in m["vix_level"].tolist()],
-            "regime": m["regime"].astype(str).tolist(),
-            "trend": m["sp500_trend"].astype(str).tolist(),
-        }
-
-    if events:
-        agg: dict[str, float] = {}
-        for e in events:
-            agg[e["ticker"]] = agg.get(e["ticker"], 0.0) + e["pnl"]
-        sorted_items = sorted(agg.items(), key=lambda kv: kv[1])
-        chart["ticker_pnl"] = {
-            "tickers": [k for k, _ in sorted_items],
-            "pnl": [float(v) for _, v in sorted_items],
-        }
-
-    return chart
+    return {
+        "portfolio": portfolio_rows,
+        "market": market_rows,
+        "events": events,
+        "open_positions": open_positions,
+        "data_min": all_dates_sorted[0] if all_dates_sorted else None,
+        "data_max": all_dates_sorted[-1] if all_dates_sorted else None,
+    }
 
 
 HTML_TEMPLATE = """<!DOCTYPE html>
@@ -360,15 +242,23 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 <script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
 <style>
   *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
-  :root{--bg:#1a1c1e;--card:#22262b;--border:#2e333a;--text:#d4cfc8;--sub:#8a8a8a;--head:#c8c0b4;--accent:#5fa3d0;--pos:#5a8a6a;--neg:#a05050;--gold:#c8a84a}
+  :root{--bg:#f5efe6;--card:#faf6ed;--border:#e6dcc8;--text:#3a3530;--sub:#8a8170;--head:#4a4238;--accent:#7a8b5c;--pos:#6b8e5a;--neg:#b06848;--gold:#c4a253}
   body{background:var(--bg);color:var(--text);font-family:'SF Pro Text','Hiragino Sans','Meiryo',system-ui,sans-serif;line-height:1.6;padding:24px;font-size:14px}
-  h1{font-size:1.6rem;color:var(--head);margin-bottom:4px}
-  h2{font-size:1.15rem;color:var(--head);margin:0 0 12px;padding-left:10px;border-left:3px solid var(--accent)}
-  .meta{color:var(--sub);font-size:.85rem;margin-bottom:24px}
-  .section{background:var(--card);border:1px solid var(--border);border-radius:10px;padding:20px;margin-bottom:20px}
+  h1{font-size:1.6rem;color:var(--head);margin-bottom:12px;font-weight:600}
+  h2{font-size:1.15rem;color:var(--head);margin:0 0 12px;padding-left:10px;border-left:3px solid var(--accent);font-weight:600}
+  .controls{display:flex;align-items:center;gap:10px;flex-wrap:wrap;background:var(--card);border:1px solid var(--border);border-radius:10px;padding:12px 16px;margin-bottom:18px;box-shadow:0 1px 2px rgba(74,66,56,.04)}
+  .controls label{color:var(--sub);font-size:.82rem;letter-spacing:.04em}
+  .controls input[type="date"]{padding:5px 8px;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--text);font-family:inherit;font-size:.9rem;color-scheme:light}
+  .controls input[type="date"]:focus{outline:none;border-color:var(--accent)}
+  .controls .sep{color:var(--sub)}
+  .controls button{padding:5px 12px;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--text);font-family:inherit;font-size:.82rem;cursor:pointer;transition:background .12s,color .12s,border-color .12s}
+  .controls button:hover{background:var(--accent);color:#faf6ed;border-color:var(--accent)}
+  .controls .meta-info{color:var(--sub);font-size:.82rem;margin-left:auto}
+  .section{background:var(--card);border:1px solid var(--border);border-radius:10px;padding:20px;margin-bottom:20px;box-shadow:0 1px 2px rgba(74,66,56,.04)}
   .cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px;margin-bottom:20px}
-  .card{background:var(--card);border:1px solid var(--border);border-radius:10px;padding:14px 16px}
+  .card{background:var(--card);border:1px solid var(--border);border-radius:10px;padding:14px 16px;box-shadow:0 1px 2px rgba(74,66,56,.04)}
   .card .label{color:var(--sub);font-size:.78rem;letter-spacing:.04em;margin-bottom:6px}
+  .card .label .asof{font-size:.72rem;letter-spacing:0;opacity:.85}
   .card .value{font-size:1.5rem;font-weight:600;color:var(--head)}
   .card .sub{color:var(--sub);font-size:.78rem;margin-top:4px}
   .positive{color:var(--pos)}
@@ -377,25 +267,27 @@ HTML_TEMPLATE = """<!DOCTYPE html>
   .tbl th,.tbl td{padding:8px 12px;border-bottom:1px solid var(--border);text-align:left}
   .tbl th{color:var(--sub);font-weight:500;font-size:.78rem;letter-spacing:.04em;text-transform:uppercase}
   .tbl td.num{text-align:right;font-variant-numeric:tabular-nums}
-  .tbl tbody tr:hover{background:rgba(95,163,208,.06)}
+  .tbl tbody tr:hover{background:rgba(122,139,92,.08)}
   .empty{color:var(--sub);padding:12px;text-align:center;font-style:italic}
   .chart{width:100%;height:340px}
   .kind{display:inline-block;padding:1px 8px;border-radius:4px;font-size:.72rem;letter-spacing:.04em}
-  .kind-full{background:rgba(95,163,208,.18);color:#9ec6e0}
-  .kind-partial{background:rgba(200,168,74,.18);color:#d6bb6c}
+  .kind-full{background:rgba(122,139,92,.18);color:#5e6e44}
+  .kind-partial{background:rgba(196,162,83,.22);color:#8a6f30}
 </style>
 </head>
 <body>
   <h1>autoTRD 取引ダッシュボード</h1>
-  <div class="meta">期間: __FIRST_DATE__ ～ __LATEST_DATE__ ／ 生成: __GEN_AT__</div>
 
-  <div class="cards">
-    <div class="card"><div class="label">総資産</div><div class="value">__TOTAL_EQUITY__</div><div class="sub">現金 __CASH__</div></div>
-    <div class="card"><div class="label">期間リターン</div><div class="value __RETURN_CLS__">__RETURN_PCT__</div><div class="sub __RETURN_CLS__">__RETURN_ABS__</div></div>
-    <div class="card"><div class="label">保有ポジション</div><div class="value">__NUM_POS__</div><div class="sub">OPEN件数 __OPEN_COUNT__</div></div>
-    <div class="card"><div class="label">累計実現損益</div><div class="value __PNL_CLS__">__TOTAL_PNL__</div><div class="sub">決済 __CLOSED_COUNT__件</div></div>
-    <div class="card"><div class="label">勝率</div><div class="value">__WIN_RATE__</div><div class="sub">平均勝 __AVG_WIN__ / 平均負 __AVG_LOSS__</div></div>
+  <div class="controls">
+    <label for="start-date">期間</label>
+    <input type="date" id="start-date" />
+    <span class="sep">～</span>
+    <input type="date" id="end-date" />
+    <button type="button" id="reset-btn" title="全期間に戻す">全期間</button>
+    <span class="meta-info" id="meta-info"></span>
   </div>
+
+  <div class="cards" id="summary-cards"></div>
 
   <div class="section">
     <h2>エクイティカーブ</h2>
@@ -404,12 +296,12 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 
   <div class="section">
     <h2>保有ポジション (OPEN)</h2>
-    __OPEN_TABLE__
+    <div id="open-table-wrap"></div>
   </div>
 
   <div class="section">
     <h2>決済履歴 (CLOSED)</h2>
-    __CLOSED_TABLE__
+    <div id="closed-table-wrap"></div>
   </div>
 
   <div class="section">
@@ -419,7 +311,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 
   <div class="section">
     <h2>戦略別パフォーマンス</h2>
-    __STRATEGY_TABLE__
+    <div id="strategy-table-wrap"></div>
   </div>
 
   <div class="section">
@@ -428,42 +320,343 @@ HTML_TEMPLATE = """<!DOCTYPE html>
   </div>
 
 <script>
-const CHART_DATA = __CHART_JSON__;
+const RAW = __RAW_JSON__;
+const INITIAL = __INITIAL_JSON__;
+const GEN_AT = "__GEN_AT__";
+
+const COLORS = {
+  bg: '#faf6ed', text: '#3a3530', grid: '#e6dcc8', line: '#d6c9b0',
+  accent: '#7a8b5c', gold: '#c4a253', pos: '#6b8e5a', neg: '#b06848',
+};
 
 const layoutBase = {
-  paper_bgcolor: '#22262b',
-  plot_bgcolor: '#22262b',
-  font: { color: '#d4cfc8', family: 'SF Pro Text, system-ui, sans-serif', size: 12 },
+  paper_bgcolor: COLORS.bg, plot_bgcolor: COLORS.bg,
+  font: { color: COLORS.text, family: 'SF Pro Text, system-ui, sans-serif', size: 12 },
   margin: { t: 20, r: 30, b: 50, l: 60 },
-  xaxis: { gridcolor: '#2e333a', linecolor: '#2e333a' },
-  yaxis: { gridcolor: '#2e333a', linecolor: '#2e333a' },
+  xaxis: { gridcolor: COLORS.grid, linecolor: COLORS.line, zerolinecolor: COLORS.line },
+  yaxis: { gridcolor: COLORS.grid, linecolor: COLORS.line, zerolinecolor: COLORS.line },
   legend: { orientation: 'h', y: -0.2 },
 };
 
-if (CHART_DATA.equity) {
-  Plotly.newPlot('equity-chart', [
-    { x: CHART_DATA.equity.x, y: CHART_DATA.equity.equity, name: '総資産', type: 'scatter', mode: 'lines+markers', line: { color: '#5fa3d0', width: 2 } },
-    { x: CHART_DATA.equity.x, y: CHART_DATA.equity.cash, name: '現金', type: 'scatter', mode: 'lines', line: { color: '#c8a84a', width: 1, dash: 'dot' } },
-  ], { ...layoutBase, yaxis: { ...layoutBase.yaxis, tickprefix: '$' } }, { displayModeBar: false, responsive: true });
-} else {
-  document.getElementById('equity-chart').innerHTML = '<p class="empty">portfolio_snapshots データがありません</p>';
+function safeNum(v) {
+  const n = Number(v);
+  return Number.isFinite(n) ? n : 0;
+}
+function fmtMoney(v, sign = false) {
+  if (v == null || !Number.isFinite(Number(v))) return '-';
+  const n = Number(v);
+  const s = (sign && n >= 0) ? '+' : '';
+  return s + '$' + n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
+function fmtPct(v) {
+  if (v == null || !Number.isFinite(Number(v))) return '-';
+  const n = Number(v);
+  return (n >= 0 ? '+' : '') + n.toFixed(2) + '%';
+}
+function cls(v) {
+  if (v == null || !Number.isFinite(Number(v))) return '';
+  const n = Number(v);
+  return n > 0 ? 'positive' : (n < 0 ? 'negative' : '');
+}
+function inRange(d, start, end) {
+  if (!d || d === '-') return false;
+  if (start && d < start) return false;
+  if (end && d > end) return false;
+  return true;
+}
+function esc(s) {
+  return String(s == null ? '' : s).replace(/[&<>"']/g, c => ({
+    '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'
+  })[c]);
 }
 
-if (CHART_DATA.ticker_pnl) {
-  const colors = CHART_DATA.ticker_pnl.pnl.map(v => v >= 0 ? '#5a8a6a' : '#a05050');
-  Plotly.newPlot('ticker-chart', [
-    { x: CHART_DATA.ticker_pnl.pnl, y: CHART_DATA.ticker_pnl.tickers, type: 'bar', orientation: 'h', marker: { color: colors } },
-  ], { ...layoutBase, xaxis: { ...layoutBase.xaxis, tickprefix: '$' } }, { displayModeBar: false, responsive: true });
-} else {
-  document.getElementById('ticker-chart').innerHTML = '<p class="empty">決済済みトレードがまだありません</p>';
+function computeSummary(portfolio, events, openCount) {
+  const s = {
+    totalEquity: 0, cash: 0, numPositions: 0,
+    startEquity: 0, returnAbs: 0, returnPct: 0,
+    openCount: openCount, closedCount: 0, totalPnl: 0,
+    winRate: 0, avgWin: 0, avgLoss: 0,
+    latestDate: '-', firstDate: '-',
+  };
+  if (portfolio.length) {
+    const sorted = portfolio.slice().sort((a, b) => a.date.localeCompare(b.date));
+    const last = sorted[sorted.length - 1];
+    s.firstDate = sorted[0].date;
+    s.latestDate = last.date;
+    s.totalEquity = safeNum(last.total_equity);
+    s.cash = safeNum(last.cash);
+    s.numPositions = safeNum(last.num_positions);
+    s.startEquity = safeNum(sorted[0].total_equity);
+    if (s.startEquity > 0) {
+      s.returnAbs = s.totalEquity - s.startEquity;
+      s.returnPct = (s.totalEquity / s.startEquity - 1) * 100;
+    }
+  }
+  if (events.length) {
+    s.closedCount = events.length;
+    s.totalPnl = events.reduce((a, e) => a + safeNum(e.pnl), 0);
+    const wins = events.filter(e => safeNum(e.pnl) > 0).map(e => safeNum(e.pnl));
+    const losses = events.filter(e => safeNum(e.pnl) <= 0).map(e => safeNum(e.pnl));
+    s.winRate = wins.length / events.length * 100;
+    s.avgWin = wins.length ? wins.reduce((a, v) => a + v, 0) / wins.length : 0;
+    s.avgLoss = losses.length ? losses.reduce((a, v) => a + v, 0) / losses.length : 0;
+  }
+  return s;
 }
 
-if (CHART_DATA.market) {
-  Plotly.newPlot('market-chart', [
-    { x: CHART_DATA.market.x, y: CHART_DATA.market.vix, name: 'VIX', type: 'scatter', mode: 'lines+markers', line: { color: '#c8a84a' }, text: CHART_DATA.market.regime, hovertemplate: '%{x}<br>VIX %{y:.1f}<br>regime %{text}<extra></extra>' },
-  ], { ...layoutBase, yaxis: { ...layoutBase.yaxis, type: 'linear' } }, { displayModeBar: false, responsive: true });
+function renderCards(s) {
+  const asOf = s.latestDate && s.latestDate !== '-' ? `${s.latestDate}時点` : '-';
+  const diffSub = (s.firstDate !== '-' && s.latestDate !== '-')
+    ? `期首 ${fmtMoney(s.startEquity)} → 期末 ${fmtMoney(s.totalEquity)}`
+    : '-';
+  document.getElementById('summary-cards').innerHTML = `
+    <div class="card"><div class="label">総資産 <span class="asof">(${asOf})</span></div><div class="value">${fmtMoney(s.totalEquity)}</div><div class="sub">現金 ${fmtMoney(s.cash)}</div></div>
+    <div class="card"><div class="label">期間差額 (期首→期末)</div><div class="value ${cls(s.returnAbs)}">${fmtMoney(s.returnAbs, true)}</div><div class="sub">${diffSub}</div></div>
+    <div class="card"><div class="label">期間リターン</div><div class="value ${cls(s.returnPct)}">${fmtPct(s.returnPct)}</div><div class="sub ${cls(s.returnPct)}">${fmtMoney(s.returnAbs, true)}</div></div>
+    <div class="card"><div class="label">保有ポジション <span class="asof">(${asOf})</span></div><div class="value">${s.numPositions}</div><div class="sub">OPEN件数 ${s.openCount}</div></div>
+    <div class="card"><div class="label">累計実現損益</div><div class="value ${cls(s.totalPnl)}">${fmtMoney(s.totalPnl, true)}</div><div class="sub">決済 ${s.closedCount}件</div></div>
+    <div class="card"><div class="label">勝率</div><div class="value">${s.closedCount ? s.winRate.toFixed(1) + '%' : '-'}</div><div class="sub">平均勝 ${s.avgWin ? fmtMoney(s.avgWin, true) : '-'} / 平均負 ${s.avgLoss ? fmtMoney(s.avgLoss, true) : '-'}</div></div>
+  `;
+}
+
+function renderOpenTable(rows, latestDate) {
+  const wrap = document.getElementById('open-table-wrap');
+  if (!rows.length) {
+    wrap.innerHTML = "<p class='empty'>保有中のポジションはありません</p>";
+    return;
+  }
+  const trs = rows.map(r => {
+    const cost = safeNum(r.entry_price) * safeNum(r.quantity);
+    let holdDays = '-';
+    if (latestDate && latestDate !== '-' && r.entry_date && r.entry_date !== '-') {
+      const e = new Date(r.entry_date);
+      const l = new Date(latestDate);
+      if (!Number.isNaN(e.getTime()) && !Number.isNaN(l.getTime())) {
+        holdDays = Math.round((l - e) / 86400000);
+      }
+    }
+    return `<tr>
+      <td>${esc(r.ticker)}</td>
+      <td class='num'>${r.quantity}</td>
+      <td class='num'>${fmtMoney(r.entry_price)}</td>
+      <td class='num'>${fmtMoney(cost)}</td>
+      <td class='num'>${fmtMoney(r.stop_loss)}</td>
+      <td class='num'>${fmtMoney(r.take_profit)}</td>
+      <td>${esc(r.strategy_name || '-')}</td>
+      <td>${esc(r.entry_date)}</td>
+      <td class='num'>${holdDays}</td>
+    </tr>`;
+  }).join('');
+  wrap.innerHTML = `<table class='tbl'><thead><tr>
+    <th>銘柄</th><th>株数</th><th>取得単価</th><th>取得額</th>
+    <th>SL</th><th>TP</th><th>戦略</th><th>建玉日</th><th>保有日数</th>
+  </tr></thead><tbody>${trs}</tbody></table>`;
+}
+
+function renderClosedTable(events) {
+  const wrap = document.getElementById('closed-table-wrap');
+  if (!events.length) {
+    wrap.innerHTML = "<p class='empty'>決済済みトレードはありません</p>";
+    return;
+  }
+  const sorted = events.slice().sort((a, b) => (b.exit_date || '').localeCompare(a.exit_date || ''));
+  const trs = sorted.map(e => {
+    const kindCls = e.kind === '部分' ? 'kind-partial' : 'kind-full';
+    return `<tr>
+      <td>${esc(e.ticker)}</td>
+      <td><span class='kind ${kindCls}'>${esc(e.kind)}</span></td>
+      <td class='num'>${e.quantity}</td>
+      <td class='num'>${fmtMoney(e.entry_price)}</td>
+      <td class='num'>${fmtMoney(e.exit_price)}</td>
+      <td class='num ${cls(e.pnl)}'>${fmtMoney(e.pnl, true)}</td>
+      <td class='num ${cls(e.pnl_pct)}'>${fmtPct(e.pnl_pct)}</td>
+      <td>${esc(e.strategy_name)}</td>
+      <td>${esc(e.entry_date)}</td>
+      <td>${esc(e.exit_date)}</td>
+    </tr>`;
+  }).join('');
+  wrap.innerHTML = `<table class='tbl'><thead><tr>
+    <th>銘柄</th><th>区分</th><th>株数</th><th>建値</th><th>決済値</th>
+    <th>損益</th><th>損益率</th><th>戦略</th><th>建玉日</th><th>決済日</th>
+  </tr></thead><tbody>${trs}</tbody></table>`;
+}
+
+function renderStrategyTable(events) {
+  const wrap = document.getElementById('strategy-table-wrap');
+  if (!events.length) {
+    wrap.innerHTML = "<p class='empty'>戦略別の決済データはまだありません</p>";
+    return;
+  }
+  const byStrat = {};
+  for (const e of events) {
+    const key = e.strategy_name || '-';
+    if (!byStrat[key]) byStrat[key] = [];
+    byStrat[key].push(e);
+  }
+  const rows = Object.entries(byStrat).map(([strat, items]) => {
+    const wins = items.filter(e => safeNum(e.pnl) > 0).length;
+    const totalPnl = items.reduce((a, e) => a + safeNum(e.pnl), 0);
+    const avgPnl = totalPnl / items.length;
+    const avgPnlPct = items.reduce((a, e) => a + safeNum(e.pnl_pct), 0) / items.length;
+    return { strat, count: items.length, wins, winRate: wins / items.length * 100, totalPnl, avgPnl, avgPnlPct };
+  }).sort((a, b) => b.totalPnl - a.totalPnl);
+  const trs = rows.map(r => `<tr>
+    <td>${esc(r.strat)}</td>
+    <td class='num'>${r.count}</td>
+    <td class='num'>${r.wins}</td>
+    <td class='num'>${r.winRate.toFixed(1)}%</td>
+    <td class='num ${cls(r.totalPnl)}'>${fmtMoney(r.totalPnl, true)}</td>
+    <td class='num ${cls(r.avgPnl)}'>${fmtMoney(r.avgPnl, true)}</td>
+    <td class='num ${cls(r.avgPnlPct)}'>${fmtPct(r.avgPnlPct)}</td>
+  </tr>`).join('');
+  wrap.innerHTML = `<table class='tbl'><thead><tr>
+    <th>戦略</th><th>件数</th><th>勝</th><th>勝率</th>
+    <th>累計損益</th><th>平均損益</th><th>平均損益率</th>
+  </tr></thead><tbody>${trs}</tbody></table>`;
+}
+
+function renderEquityChart(rows) {
+  const el = document.getElementById('equity-chart');
+  if (!rows.length) {
+    el.innerHTML = '<p class="empty">対象期間に portfolio_snapshots データがありません</p>';
+    return;
+  }
+  const sorted = rows.slice().sort((a, b) => a.date.localeCompare(b.date));
+  const x = sorted.map(r => r.date);
+  const y = sorted.map(r => safeNum(r.total_equity));
+
+  const yMin = Math.min(...y);
+  const yMax = Math.max(...y);
+  const span = yMax - yMin;
+  const pad = span > 0 ? span * 0.08 : Math.max(yMax * 0.01, 10);
+  const yRange = [yMin - pad, yMax + pad];
+
+  const startVal = y[0];
+  const endVal = y[y.length - 1];
+  const startDate = x[0];
+  const endDate = x[x.length - 1];
+  const fmt = v => '$' + v.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+
+  Plotly.newPlot(el, [
+    { x, y, name: '総資産', type: 'scatter', mode: 'lines+markers',
+      line: { color: COLORS.accent, width: 2, shape: 'linear' },
+      marker: { color: COLORS.accent, size: 5 },
+      fill: 'tozeroy',
+      fillcolor: 'rgba(122,139,92,0.12)',
+      hovertemplate: '%{x|%Y-%m-%d}<br>%{y:$,.2f}<extra></extra>' },
+  ], {
+    ...layoutBase,
+    xaxis: { ...layoutBase.xaxis, type: 'date' },
+    yaxis: { ...layoutBase.yaxis, type: 'linear', tickformat: '$,.0f', range: yRange },
+    showlegend: false,
+    annotations: [
+      { x: startDate, y: startVal, text: `期首: ${fmt(startVal)}`,
+        showarrow: false, xanchor: 'left', yanchor: 'bottom', xshift: 6, yshift: 6,
+        font: { size: 11, color: COLORS.text },
+        bgcolor: 'rgba(250,246,237,0.85)', borderpad: 3 },
+      { x: endDate, y: endVal, text: `期末: ${fmt(endVal)}`,
+        showarrow: false, xanchor: 'right', yanchor: 'top', xshift: -6, yshift: -6,
+        font: { size: 11, color: COLORS.text },
+        bgcolor: 'rgba(250,246,237,0.85)', borderpad: 3 },
+    ],
+  }, { displayModeBar: false, responsive: true });
+}
+
+function renderTickerChart(events) {
+  const el = document.getElementById('ticker-chart');
+  if (!events.length) {
+    el.innerHTML = '<p class="empty">対象期間に決済済みトレードがありません</p>';
+    return;
+  }
+  const agg = {};
+  for (const e of events) agg[e.ticker] = (agg[e.ticker] || 0) + safeNum(e.pnl);
+  const sorted = Object.entries(agg).sort((a, b) => a[1] - b[1]);
+  const tickers = sorted.map(x => x[0]);
+  const pnls = sorted.map(x => x[1]);
+  const colors = pnls.map(v => v >= 0 ? COLORS.pos : COLORS.neg);
+  Plotly.newPlot(el, [
+    { x: pnls, y: tickers, type: 'bar', orientation: 'h', marker: { color: colors } },
+  ], {
+    ...layoutBase,
+    xaxis: { ...layoutBase.xaxis, type: 'linear', tickformat: '$,.0f' },
+    yaxis: { ...layoutBase.yaxis, type: 'category' },
+  }, { displayModeBar: false, responsive: true });
+}
+
+function renderMarketChart(rows) {
+  const el = document.getElementById('market-chart');
+  if (!rows.length) {
+    el.innerHTML = '<p class="empty">対象期間に market_conditions データがありません</p>';
+    return;
+  }
+  const sorted = rows.slice().sort((a, b) => a.date.localeCompare(b.date));
+  Plotly.newPlot(el, [
+    { x: sorted.map(r => r.date), y: sorted.map(r => r.vix), name: 'VIX',
+      type: 'scatter', mode: 'lines+markers',
+      line: { color: COLORS.neg, width: 1.8 }, marker: { color: COLORS.neg, size: 5 },
+      text: sorted.map(r => r.regime),
+      hovertemplate: '%{x}<br>VIX %{y:.1f}<br>regime %{text}<extra></extra>' },
+  ], {
+    ...layoutBase,
+    xaxis: { ...layoutBase.xaxis, type: 'date' },
+    yaxis: { ...layoutBase.yaxis, type: 'linear' },
+  }, { displayModeBar: false, responsive: true });
+}
+
+function refresh() {
+  const startEl = document.getElementById('start-date');
+  const endEl = document.getElementById('end-date');
+  let start = startEl.value || null;
+  let end = endEl.value || null;
+  if (start && end && start > end) {
+    [start, end] = [end, start];
+    startEl.value = start;
+    endEl.value = end;
+  }
+
+  const portfolio = RAW.portfolio.filter(r => inRange(r.date, start, end));
+  const market = RAW.market.filter(r => inRange(r.date, start, end));
+  const events = RAW.events.filter(e => inRange(e.exit_date, start, end));
+  const openPos = end
+    ? RAW.open_positions.filter(p => p.entry_date && p.entry_date !== '-' && p.entry_date <= end)
+    : RAW.open_positions.slice();
+
+  const summary = computeSummary(portfolio, events, openPos.length);
+  renderCards(summary);
+
+  const periodLabel = `${start || RAW.data_min || '-'} ～ ${end || RAW.data_max || '-'}`;
+  document.getElementById('meta-info').textContent = `期間: ${periodLabel} ／ 生成: ${GEN_AT}`;
+
+  renderOpenTable(openPos, summary.latestDate);
+  renderClosedTable(events);
+  renderStrategyTable(events);
+  renderEquityChart(portfolio);
+  renderTickerChart(events);
+  renderMarketChart(market);
+}
+
+function init() {
+  const startEl = document.getElementById('start-date');
+  const endEl = document.getElementById('end-date');
+  if (RAW.data_min) { startEl.min = RAW.data_min; endEl.min = RAW.data_min; }
+  if (RAW.data_max) { startEl.max = RAW.data_max; endEl.max = RAW.data_max; }
+  startEl.value = INITIAL.start || RAW.data_min || '';
+  endEl.value = INITIAL.end || RAW.data_max || '';
+
+  startEl.addEventListener('change', refresh);
+  endEl.addEventListener('change', refresh);
+  document.getElementById('reset-btn').addEventListener('click', () => {
+    startEl.value = RAW.data_min || '';
+    endEl.value = RAW.data_max || '';
+    refresh();
+  });
+  refresh();
+}
+
+if (document.readyState === 'loading') {
+  document.addEventListener('DOMContentLoaded', init);
 } else {
-  document.getElementById('market-chart').innerHTML = '<p class="empty">market_conditions データがありません</p>';
+  init();
 }
 </script>
 </body>
@@ -471,46 +664,39 @@ if (CHART_DATA.market) {
 """
 
 
-def render_html(
-    dfs: dict[str, pd.DataFrame],
-    summary: dict,
-    strategy_perf: list[dict],
-    events: list[dict],
-) -> str:
-    trades = dfs["trade_log"]
-    open_df = trades[trades["status"] == "OPEN"].copy() if not trades.empty else pd.DataFrame()
-
-    chart_json = json.dumps(build_chart_data(dfs, events), ensure_ascii=False)
-
+def render_html(raw: dict, initial: dict) -> str:
     html = HTML_TEMPLATE
-    replacements = {
-        "__FIRST_DATE__": summary["first_date"],
-        "__LATEST_DATE__": summary["latest_date"],
-        "__GEN_AT__": datetime.now().strftime("%Y-%m-%d %H:%M"),
-        "__TOTAL_EQUITY__": _fmt_money(summary["total_equity"]),
-        "__CASH__": _fmt_money(summary["cash"]),
-        "__RETURN_PCT__": f"{summary['return_pct']:+.2f}%",
-        "__RETURN_ABS__": _fmt_money(summary["return_abs"], sign=True),
-        "__RETURN_CLS__": _cls(summary["return_pct"]),
-        "__NUM_POS__": str(summary["num_positions"]),
-        "__OPEN_COUNT__": str(summary["open_count"]),
-        "__TOTAL_PNL__": _fmt_money(summary["total_pnl"], sign=True),
-        "__PNL_CLS__": _cls(summary["total_pnl"]),
-        "__CLOSED_COUNT__": str(summary["closed_count"]),
-        "__WIN_RATE__": f"{summary['win_rate']:.1f}%" if summary["closed_count"] else "-",
-        "__AVG_WIN__": _fmt_money(summary["avg_win"], sign=True) if summary["avg_win"] else "-",
-        "__AVG_LOSS__": _fmt_money(summary["avg_loss"], sign=True) if summary["avg_loss"] else "-",
-        "__OPEN_TABLE__": render_open_table(open_df, summary["latest_date"]),
-        "__CLOSED_TABLE__": render_closed_table(events),
-        "__STRATEGY_TABLE__": render_strategy_table(strategy_perf),
-        "__CHART_JSON__": chart_json,
-    }
-    for key, val in replacements.items():
-        html = html.replace(key, val)
+    html = html.replace("__RAW_JSON__", json.dumps(raw, ensure_ascii=False))
+    html = html.replace("__INITIAL_JSON__", json.dumps(initial, ensure_ascii=False))
+    html = html.replace("__GEN_AT__", datetime.now().strftime("%Y-%m-%d %H:%M"))
     return html
 
 
-def main() -> None:
+def _parse_date(s: str | None) -> str | None:
+    """YYYY-MM-DD 形式を検証し、そのまま返す（不正なら例外）。"""
+    if not s:
+        return None
+    try:
+        pd.Timestamp(s)
+    except Exception as e:
+        raise SystemExit(f"日付の形式が不正です: {s} ({e})")
+    return s
+
+
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    p = argparse.ArgumentParser(description="autoTRD 取引ダッシュボードを生成")
+    p.add_argument("--start", type=str, default=None, help="期間の開始日 YYYY-MM-DD（画面の日付ピッカー初期値）")
+    p.add_argument("--end", type=str, default=None, help="期間の終了日 YYYY-MM-DD（画面の日付ピッカー初期値）")
+    return p.parse_args(argv)
+
+
+def main(argv: list[str] | None = None) -> None:
+    args = parse_args(argv)
+    start = _parse_date(args.start)
+    end = _parse_date(args.end)
+    if start is not None and end is not None and start > end:
+        raise SystemExit(f"--start ({start}) は --end ({end}) 以前である必要があります")
+
     if not CSV_DIR.exists():
         raise SystemExit(f"CSV ディレクトリが見つかりません: {CSV_DIR}\n先に `bash scripts/sync_db_csv.sh` を実行してください。")
 
@@ -520,13 +706,16 @@ def main() -> None:
 
     partials = extract_partial_exits(dfs["trade_log"], dfs["orders"])
     events = build_realized_events(dfs["trade_log"], partials)
-    summary = compute_summary(dfs, events)
-    strategy_perf = compute_strategy_perf(events)
-    html = render_html(dfs, summary, strategy_perf, events)
+    raw = build_raw_data(dfs, events)
+    initial = {"start": start, "end": end}
 
+    html = render_html(raw, initial)
     OUTPUT.parent.mkdir(parents=True, exist_ok=True)
     OUTPUT.write_text(html, encoding="utf-8")
+
     print(f"✅ ダッシュボード生成完了: {OUTPUT}")
+    if start or end:
+        print(f"   初期表示期間: {start or '(最古)'} ～ {end or '(最新)'}")
     print(f"   ブラウザで開く: open {OUTPUT}")
 
 
