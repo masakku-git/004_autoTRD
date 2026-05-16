@@ -294,8 +294,8 @@ HTML_TEMPLATE = """<!DOCTYPE html>
   .card .label .asof{font-size:.72rem;letter-spacing:0;opacity:.85}
   .card .value{font-size:1.5rem;font-weight:600;color:var(--head)}
   .card .sub{color:var(--sub);font-size:.78rem;margin-top:4px}
-  .positive{color:var(--pos)}
-  .negative{color:var(--neg)}
+  .positive{color:var(--pos)!important}
+  .negative{color:var(--neg)!important}
   .tbl{width:100%;border-collapse:collapse;font-size:.85rem}
   .tbl th,.tbl td{padding:8px 12px;border-bottom:1px solid var(--border);text-align:left}
   .tbl th{color:var(--sub);font-weight:500;font-size:.78rem;letter-spacing:.04em;text-transform:uppercase}
@@ -447,7 +447,7 @@ function renderCards(s) {
     <div class="card"><div class="label">期間差額 (期首→期末)</div><div class="value ${cls(s.returnAbs)}">${fmtMoney(s.returnAbs, true)}</div><div class="sub">${diffSub}</div></div>
     <div class="card"><div class="label">期間リターン</div><div class="value ${cls(s.returnPct)}">${fmtPct(s.returnPct)}</div><div class="sub ${cls(s.returnPct)}">${fmtMoney(s.returnAbs, true)}</div></div>
     <div class="card"><div class="label">累計実現損益</div><div class="value ${cls(s.totalPnl)}">${fmtMoney(s.totalPnl, true)}</div><div class="sub">決済 ${s.closedCount}件</div></div>
-    <div class="card"><div class="label">勝率</div><div class="value">${s.closedCount ? s.winRate.toFixed(1) + '%' : '-'}</div><div class="sub">平均勝 ${s.avgWin ? fmtMoney(s.avgWin, true) : '-'} / 平均負 ${s.avgLoss ? fmtMoney(s.avgLoss, true) : '-'}</div></div>
+    <div class="card"><div class="label">勝率</div><div class="value">${s.closedCount ? s.winRate.toFixed(1) + '%' : '-'}</div><div class="sub">平均勝 <span class="${cls(s.avgWin)}">${s.avgWin ? fmtMoney(s.avgWin, true) : '-'}</span> / 平均負 <span class="${cls(s.avgLoss)}">${s.avgLoss ? fmtMoney(s.avgLoss, true) : '-'}</span></div></div>
   `;
 }
 
