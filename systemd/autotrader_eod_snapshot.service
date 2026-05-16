@@ -1,0 +1,11 @@
+[Unit]
+Description=AutoTRD Weekly EOD Portfolio Snapshot
+After=network.target opend.service
+
+[Service]
+Type=oneshot
+User=trader
+WorkingDirectory=/home/trader/autoTRD
+ExecStart=/home/trader/autoTRD/.venv/bin/python scripts/save_eod_snapshot.py
+Environment=PYTHONPATH=/home/trader/autoTRD
+EnvironmentFile=/home/trader/autoTRD/.env
