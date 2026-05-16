@@ -180,6 +180,32 @@ def _recompute_snapshot(row: pd.Series) -> dict:
     }
 
 
+def _extract_held_positions(pj_raw) -> list[dict]:
+    """positions_json から qty>0 の銘柄のみ抽出（端株を除外、ticker は US. プレフィックス除去）。"""
+    if pd.isna(pj_raw) or not str(pj_raw).strip():
+        return []
+    try:
+        positions = json.loads(pj_raw)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return []
+    held: list[dict] = []
+    for pos in positions:
+        try:
+            qty = int(pos.get("qty") or 0)
+        except (TypeError, ValueError):
+            qty = 0
+        if qty <= 0:
+            continue
+        ticker = str(pos.get("ticker", "")).replace("US.", "")
+        held.append({
+            "ticker": ticker,
+            "qty": qty,
+            "avg_price": _safe_num(pos.get("avg_price")),
+            "market_value": _safe_num(pos.get("market_value")),
+        })
+    return held
+
+
 def build_raw_data(dfs: dict[str, pd.DataFrame], events: list[dict]) -> dict:
     """ブラウザに渡す全データ（フィルタ前）を組み立てる。"""
     portfolio_rows: list[dict] = []
@@ -192,6 +218,7 @@ def build_raw_data(dfs: dict[str, pd.DataFrame], events: list[dict]) -> dict:
                 "total_equity": corr["total_equity"],
                 "cash": corr["cash"],
                 "num_positions": corr["num_positions"],
+                "positions": _extract_held_positions(r.get("positions_json")),
             })
 
     market_rows: list[dict] = []
@@ -205,17 +232,19 @@ def build_raw_data(dfs: dict[str, pd.DataFrame], events: list[dict]) -> dict:
                 "trend": str(r.get("sp500_trend", "-")),
             })
 
-    open_positions: list[dict] = []
+    # trade_log の status=OPEN 行は「現在保有中の銘柄リスト」としては信頼できない
+    # (close_trade_log の更新漏れで古いゴミ行が残ることがあるため)。
+    # ここでは銘柄ごとに SL/TP/戦略/建玉日をルックアップする辞書として保持し、
+    # 実際の保有銘柄リストは portfolio_snapshot.positions_json を信頼源とする (JS 側で結合)。
+    open_trade_lookup: list[dict] = []
     trades = dfs["trade_log"]
     if not trades.empty:
         open_df = trades[trades["status"] == "OPEN"]
         for _, r in open_df.iterrows():
             entry_d = pd.to_datetime(r.get("entry_date"), errors="coerce")
             entry_date = entry_d.strftime("%Y-%m-%d") if pd.notna(entry_d) else "-"
-            open_positions.append({
-                "ticker": str(r["ticker"]),
-                "quantity": int(_safe_num(r.get("quantity"))),
-                "entry_price": _safe_num(r.get("entry_price")),
+            open_trade_lookup.append({
+                "ticker": str(r["ticker"]).replace("US.", ""),
                 "stop_loss": _safe_num(r.get("stop_loss")),
                 "take_profit": _safe_num(r.get("take_profit")),
                 "strategy_name": str(r.get("strategy_name", "-")),
@@ -232,7 +261,7 @@ def build_raw_data(dfs: dict[str, pd.DataFrame], events: list[dict]) -> dict:
         "portfolio": portfolio_rows,
         "market": market_rows,
         "events": events,
-        "open_positions": open_positions,
+        "open_trade_lookup": open_trade_lookup,
         "data_min": all_dates_sorted[0] if all_dates_sorted else None,
         "data_max": all_dates_sorted[-1] if all_dates_sorted else None,
     }
@@ -421,6 +450,32 @@ function renderCards(s) {
     <div class="card"><div class="label">累計実現損益</div><div class="value ${cls(s.totalPnl)}">${fmtMoney(s.totalPnl, true)}</div><div class="sub">決済 ${s.closedCount}件</div></div>
     <div class="card"><div class="label">勝率</div><div class="value">${s.closedCount ? s.winRate.toFixed(1) + '%' : '-'}</div><div class="sub">平均勝 ${s.avgWin ? fmtMoney(s.avgWin, true) : '-'} / 平均負 ${s.avgLoss ? fmtMoney(s.avgLoss, true) : '-'}</div></div>
   `;
+}
+
+function buildOpenFromSnapshot(snapshot) {
+  // snapshot.positions (qty>0、実際の保有) を正本にし、trade_log から
+  // SL/TP/戦略/建玉日を ticker 単位でルックアップして合成する。
+  // 同一 ticker の OPEN trade_log 行が複数ある場合は最新の建玉日を採用。
+  if (!snapshot || !snapshot.positions || !snapshot.positions.length) return [];
+  const lookup = {};
+  for (const t of (RAW.open_trade_lookup || [])) {
+    const key = t.ticker;
+    if (!lookup[key] || (t.entry_date || '') > (lookup[key].entry_date || '')) {
+      lookup[key] = t;
+    }
+  }
+  return snapshot.positions.map(pos => {
+    const t = lookup[pos.ticker] || {};
+    return {
+      ticker: pos.ticker,
+      quantity: pos.qty,
+      entry_price: pos.avg_price,
+      stop_loss: t.stop_loss != null ? t.stop_loss : 0,
+      take_profit: t.take_profit != null ? t.take_profit : 0,
+      strategy_name: t.strategy_name || '-',
+      entry_date: t.entry_date || '-',
+    };
+  });
 }
 
 function renderOpenTable(rows, latestDate) {
@@ -621,9 +676,11 @@ function refresh() {
   const portfolio = RAW.portfolio.filter(r => inRange(r.date, start, end));
   const market = RAW.market.filter(r => inRange(r.date, start, end));
   const events = RAW.events.filter(e => inRange(e.exit_date, start, end));
-  const openPos = end
-    ? RAW.open_positions.filter(p => p.entry_date && p.entry_date !== '-' && p.entry_date <= end)
-    : RAW.open_positions.slice();
+  // OPEN ポジションは「対象期間末端のスナップショット」を信頼源にする
+  // (trade_log の status=OPEN は更新漏れがあるため使わない)
+  const sortedPort = portfolio.slice().sort((a, b) => a.date.localeCompare(b.date));
+  const lastSnap = sortedPort.length ? sortedPort[sortedPort.length - 1] : null;
+  const openPos = buildOpenFromSnapshot(lastSnap);
 
   const summary = computeSummary(portfolio, events, openPos.length);
   renderCards(summary);
