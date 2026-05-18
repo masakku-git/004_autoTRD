@@ -26,11 +26,14 @@ from __future__ import annotations
 import json
 import time
 from datetime import datetime, timedelta
+from io import StringIO
 from pathlib import Path
 
 import pandas as pd
+import requests
 import yfinance as yf
 
+from config.settings import settings
 from src.utils.logger import logger
 
 # ── 設定 ───────────────────────────────────────────────────────────
@@ -146,10 +149,27 @@ def _build_universe() -> list[str]:
     return selected["ticker"].tolist()
 
 
+def _build_user_agent() -> str:
+    # Wikimedia は `python-urllib/*` のような汎用ライブラリ名のみの UA を 403 で拒否する。
+    # 識別可能なアプリ名と連絡先を含めること。
+    contact = settings.contact_email or "no-contact-provided"
+    if not settings.contact_email:
+        logger.warning(
+            "[universe_builder] CONTACT_EMAIL が未設定です。Wikipedia 側で再ブロックされる可能性があります"
+        )
+    return f"autoTRD-bot/1.0 ({contact})"
+
+
 def _fetch_sp500_list() -> pd.DataFrame | None:
     """WikipediaからS&P500構成銘柄リストを取得する。"""
     try:
-        tables = pd.read_html(_SP500_WIKI_URL)
+        resp = requests.get(
+            _SP500_WIKI_URL,
+            headers={"User-Agent": _build_user_agent()},
+            timeout=30,
+        )
+        resp.raise_for_status()
+        tables = pd.read_html(StringIO(resp.text))
         df = tables[0]
 
         # カラム名を正規化

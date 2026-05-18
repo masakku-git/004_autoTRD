@@ -51,6 +51,10 @@ class Settings(BaseSettings):
     # タイムゾーン
     tz: str = "Asia/Tokyo"
 
+    # 外部API (Wikipedia等) アクセス時の User-Agent に含める連絡先
+    # Wikimedia User-Agent policy: https://meta.wikimedia.org/wiki/User-Agent_policy
+    contact_email: str = ""
+
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
 
 
