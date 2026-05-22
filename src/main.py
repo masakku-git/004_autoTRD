@@ -172,22 +172,32 @@ def run_daily():
         account = get_account_info()
 
     # 保有ポジションに対して売却シグナルをチェック
+    # 設計方針: 各ポジションは購入時の戦略でのみ売却判定する（戦略間のクロス介入を防ぐ）
     for pos in account.positions:
         ticker = pos["ticker"].replace("US.", "")
         df = get_ohlcv(ticker)
         if df.empty:
             continue
-        for strategy in strategies:
-            signal = strategy.generate_signals(ticker, df, market_condition)
-            if signal and signal.action == "SELL":
-                # Critic evaluates SELL signals too (prevents panic selling)
-                verdict = evaluate_signal(signal, df, market_condition, strategy.name)
-                if verdict.approved:
-                    signal.confidence = verdict.adjusted_confidence
-                    sell_signals.append(signal)
-                else:
-                    rejected_signals.append((signal, verdict))
-                break
+        trade_info = _get_open_trade_info(ticker)
+        if not trade_info:
+            continue
+        strategy_name = trade_info.get("strategy_name", "")
+        try:
+            strategy = get_strategy(strategy_name)
+        except KeyError:
+            logger.warning(
+                f"{ticker}: 購入戦略 '{strategy_name}' がregistryに無いためSELL判定をスキップ"
+            )
+            continue
+        signal = strategy.generate_signals(ticker, df, market_condition)
+        if signal and signal.action == "SELL":
+            # Critic evaluates SELL signals too (prevents panic selling)
+            verdict = evaluate_signal(signal, df, market_condition, strategy.name)
+            if verdict.approved:
+                signal.confidence = verdict.adjusted_confidence
+                sell_signals.append(signal)
+            else:
+                rejected_signals.append((signal, verdict))
 
     # スクリーニング通過銘柄に対して買いシグナルをチェック
     for candidate in candidates:
