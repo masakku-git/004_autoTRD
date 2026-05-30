@@ -27,3 +27,4 @@ scripts/sync_logs.sh
 emergency_recovery/
 maintenance/
 tax_2026/
+weeklyReport/
