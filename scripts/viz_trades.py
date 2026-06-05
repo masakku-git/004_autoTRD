@@ -20,7 +20,7 @@ import argparse
 import json
 import math
 import re
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import pandas as pd
@@ -768,6 +768,9 @@ def main(argv: list[str] | None = None) -> None:
     partials = extract_partial_exits(dfs["trade_log"], dfs["orders"])
     events = build_realized_events(dfs["trade_log"], partials)
     raw = build_raw_data(dfs, events)
+    if start is None:
+        today = datetime.now()
+        start = (today - timedelta(days=today.weekday())).strftime("%Y-%m-%d")
     initial = {"start": start, "end": end}
 
     html = render_html(raw, initial)
