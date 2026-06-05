@@ -486,11 +486,12 @@ function renderOpenTable(rows, latestDate) {
   const trs = rows.map(r => {
     const cost = safeNum(r.entry_price) * safeNum(r.quantity);
     let holdDays = '-';
-    if (latestDate && latestDate !== '-' && r.entry_date && r.entry_date !== '-') {
+    if (r.entry_date && r.entry_date !== '-') {
       const e = new Date(r.entry_date);
-      const l = new Date(latestDate);
-      if (!Number.isNaN(e.getTime()) && !Number.isNaN(l.getTime())) {
-        holdDays = Math.round((l - e) / 86400000);
+      const today = new Date();
+      today.setHours(0, 0, 0, 0);
+      if (!Number.isNaN(e.getTime())) {
+        holdDays = Math.max(0, Math.round((today - e) / 86400000));
       }
     }
     return `<tr>
