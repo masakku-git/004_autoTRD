@@ -28,3 +28,5 @@ emergency_recovery/
 maintenance/
 tax_2026/
 weeklyReport/
+scripts/gen_weekly_report.py
+scripts/viz_trades.py
