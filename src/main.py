@@ -83,8 +83,6 @@ def run_daily():
         if df.empty:
             continue
         current_price = float(df["Close"].iloc[-1])
-        # TP1判定には日中高値も使う（終値がTP1未満でも高値が超えていれば発動）
-        today_high = float(df["High"].iloc[-1])
 
         # TradeLogからSL/TP/エントリー日を取得
         trade_info = _get_open_trade_info(ticker)
@@ -123,36 +121,30 @@ def run_daily():
             pass  # 戦略が見つからない場合はデフォルトロジックを使用
 
         exit_reason = None
-        # 通常は終値で決済。TP1を日中に超えた場合のみTP1価格を使う（後述）
-        exit_price = current_price
 
         # (2) ストップロス（常にチェック）
         if sl > 0 and current_price <= sl:
             exit_reason = f"ストップロス発動 (SL=${sl:.2f}, 現在=${current_price:.2f})"
 
-        # (3) 段階利確（TP1）: 終値または日中高値がTP1到達で半分を決済
-        # 終値がTP1未満でも日中高値が超えていれば発動（limit注文なら日中に約定可能だったため）
-        elif tp1 > 0 and (current_price >= tp1 or today_high >= tp1):
-            # 終値がTP1を超えていれば終値、超えていなければTP1価格で約定したとみなす
-            tp1_fill = current_price if current_price >= tp1 else tp1
+        # (3) 段階利確（TP1）: 半分を決済
+        elif tp1 > 0 and current_price >= tp1:
             half_qty = max(trade_qty // 2, 1)
             if broker_qty > 0 and half_qty < broker_qty:
                 forced_signal = Signal(
                     ticker=ticker, action="SELL", confidence=1.0,
                     stop_loss=0, take_profit=0,
-                    reason=f"段階利確TP1到達 (TP1=${tp1:.2f}, 高値=${today_high:.2f}, 終値=${current_price:.2f})",
-                    price=tp1_fill,
+                    reason=f"段階利確TP1到達 (TP1=${tp1:.2f}, 現在=${current_price:.2f})",
+                    price=current_price,
                 )
                 order = place_order(forced_signal, half_qty)
-                partial_close_trade_log(ticker, order, tp1_fill, half_qty)
+                partial_close_trade_log(ticker, order, current_price, half_qty)
                 forced_exit_orders.append(
                     f"PARTIAL-EXIT {half_qty}x {ticker}: 段階利確TP1=${tp1:.2f}"
                 )
-                logger.info(f"Staged TP1: sold {half_qty} of {broker_qty} shares @ ${tp1_fill:.2f}")
+                logger.info(f"Staged TP1: sold {half_qty} of {broker_qty} shares")
             elif broker_qty > 0:
                 # 1株しかない場合は全量決済
-                exit_reason = f"段階利確TP1到達・全量決済 (TP1=${tp1:.2f}, 高値=${today_high:.2f}, 終値=${current_price:.2f})"
-                exit_price = tp1_fill
+                exit_reason = f"段階利確TP1到達・全量決済 (TP1=${tp1:.2f}, 現在=${current_price:.2f})"
 
         # (4) 通常利確（suppress_tp=Trueならスキップ）
         elif not suppress_tp and tp > 0 and current_price >= tp:
@@ -168,10 +160,10 @@ def run_daily():
             forced_signal = Signal(
                 ticker=ticker, action="SELL", confidence=1.0,
                 stop_loss=0, take_profit=0, reason=exit_reason,
-                price=exit_price,
+                price=current_price,
             )
             order = place_order(forced_signal, broker_qty)
-            close_trade_log(ticker, order, exit_price)
+            close_trade_log(ticker, order, current_price)
             forced_exit_orders.append(f"FORCED-EXIT {broker_qty}x {ticker}: {exit_reason}")
             logger.info(f"Forced exit: {exit_reason}")
 
