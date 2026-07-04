@@ -83,6 +83,8 @@ def run_daily():
         if df.empty:
             continue
         current_price = float(df["Close"].iloc[-1])
+        today_high = float(df["High"].iloc[-1])
+        _update_highest_price(ticker, today_high)
 
         # TradeLogからSL/TP/エントリー日を取得
         trade_info = _get_open_trade_info(ticker)
@@ -340,9 +342,32 @@ def _get_open_trade_info(ticker: str) -> dict | None:
             "max_hold_days": trade.max_hold_days or 20,
             "entry_date": trade.entry_date,
             "entry_price": trade.entry_price,
+            "highest_price": trade.highest_price or trade.entry_price,
             "quantity": trade.quantity,
             "strategy_name": trade.strategy_name,
         }
+
+
+def _update_highest_price(ticker: str, today_high: float) -> None:
+    """建値後の最高値を更新する（ブレークイーブン/トレーリングストップ判定に使用）。
+
+    同銘柄に複数のOPEN行がある場合も全行を更新する。
+    """
+    from sqlalchemy import select
+
+    from src.models.trade import TradeLog
+
+    with get_session() as session:
+        trades = session.execute(
+            select(TradeLog)
+            .where(TradeLog.ticker == ticker)
+            .where(TradeLog.status == "OPEN")
+        ).scalars().all()
+        for trade in trades:
+            baseline = trade.highest_price or trade.entry_price
+            if today_high > baseline:
+                trade.highest_price = today_high
+        session.commit()
 
 
 def _get_previous_equity() -> float:

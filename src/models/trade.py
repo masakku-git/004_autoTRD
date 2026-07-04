@@ -42,6 +42,7 @@ class TradeLog(Base):
     exit_date: Mapped[Optional[date]] = mapped_column(Date, nullable=True)
     entry_price: Mapped[float] = mapped_column(Float)
     exit_price: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    highest_price: Mapped[Optional[float]] = mapped_column(Float, nullable=True)  # 建値後の最高値（トレーリング/ブレークイーブン判定用）
     quantity: Mapped[int] = mapped_column(Integer)
     pnl: Mapped[Optional[float]] = mapped_column(Float, nullable=True)        # 損益（ドル）
     pnl_pct: Mapped[Optional[float]] = mapped_column(Float, nullable=True)    # 損益率（%）

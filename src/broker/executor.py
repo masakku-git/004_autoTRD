@@ -168,11 +168,13 @@ def create_trade_log(
         return
 
     with get_session() as session:
+        entry_price = order.filled_price or order.price or 0
         trade = TradeLog(
             ticker=signal.ticker,
             entry_order_id=order.id,
             entry_date=datetime.utcnow().date(),
-            entry_price=order.filled_price or order.price or 0,
+            entry_price=entry_price,
+            highest_price=entry_price,
             quantity=quantity,
             strategy_name=order.strategy_name,
             stop_loss=signal.stop_loss,
