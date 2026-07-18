@@ -8,6 +8,7 @@ from sqlalchemy import engine_from_config, pool
 # Add project root to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+from config.settings import settings
 from src.models.base import Base
 
 # Alembic Config object
@@ -15,6 +16,9 @@ config = context.config
 
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
+
+# .env の DATABASE_URL を使う（alembic.ini の sqlalchemy.url はプレースホルダーのため無視する）
+config.set_main_option("sqlalchemy.url", settings.database_url)
 
 target_metadata = Base.metadata
 
