@@ -73,40 +73,41 @@ def _update_trade_log(session, order: Order, actual_price: float) -> None:
     """Orderの side に応じて TradeLog の entry_price / exit_price と pnl を更新する。
 
     - BUY: entry_price を実約定価格に置き換え。CLOSED 済みなら pnl も再計算
-    - SELL: trade_log.exit_order_id == order.id の trade を更新（最終決済のみ。
-            部分決済の中間注文は trade_log の参照を持たないためスキップ）
+    - SELL: trade_log.exit_order_id == order.id の trade を更新
+
+    同一注文を複数の trade_log 行が参照するケースに対応するため全行を更新する
+    （段階決済の分割CLOSED行が entry_order_id を共有する / 複数OPEN行の一括
+    クローズが exit_order_id を共有する）。
     """
     if order.side == "BUY":
-        trade = session.execute(
+        trades = session.execute(
             select(TradeLog).where(TradeLog.entry_order_id == order.id)
-        ).scalar_one_or_none()
-        if trade is None:
-            return
-        old = trade.entry_price
-        trade.entry_price = actual_price
-        if trade.status == "CLOSED" and trade.exit_price is not None:
-            trade.pnl = (trade.exit_price - actual_price) * trade.quantity
-            if actual_price > 0:
-                trade.pnl_pct = (trade.exit_price / actual_price - 1) * 100
-        logger.info(
-            f"  → trade_log id={trade.id} {trade.ticker}: entry_price ${old:.2f} → ${actual_price:.2f}"
-        )
+        ).scalars().all()
+        for trade in trades:
+            old = trade.entry_price
+            trade.entry_price = actual_price
+            if trade.status == "CLOSED" and trade.exit_price is not None:
+                trade.pnl = (trade.exit_price - actual_price) * trade.quantity
+                if actual_price > 0:
+                    trade.pnl_pct = (trade.exit_price / actual_price - 1) * 100
+            logger.info(
+                f"  → trade_log id={trade.id} {trade.ticker}: entry_price ${old:.2f} → ${actual_price:.2f}"
+            )
     elif order.side == "SELL":
-        trade = session.execute(
+        trades = session.execute(
             select(TradeLog).where(TradeLog.exit_order_id == order.id)
-        ).scalar_one_or_none()
-        if trade is None:
-            return
-        old = trade.exit_price
-        trade.exit_price = actual_price
-        trade.pnl = (actual_price - trade.entry_price) * trade.quantity
-        if trade.entry_price > 0:
-            trade.pnl_pct = (actual_price / trade.entry_price - 1) * 100
-        old_str = f"${old:.2f}" if old is not None else "None"
-        logger.info(
-            f"  → trade_log id={trade.id} {trade.ticker}: exit_price {old_str} → ${actual_price:.2f} "
-            f"(pnl=${trade.pnl:.2f}, {trade.pnl_pct:.2f}%)"
-        )
+        ).scalars().all()
+        for trade in trades:
+            old = trade.exit_price
+            trade.exit_price = actual_price
+            trade.pnl = (actual_price - trade.entry_price) * trade.quantity
+            if trade.entry_price > 0:
+                trade.pnl_pct = (actual_price / trade.entry_price - 1) * 100
+            old_str = f"${old:.2f}" if old is not None else "None"
+            logger.info(
+                f"  → trade_log id={trade.id} {trade.ticker}: exit_price {old_str} → ${actual_price:.2f} "
+                f"(pnl=${trade.pnl:.2f}, {trade.pnl_pct:.2f}%)"
+            )
 
 
 def reconcile(days: int, dry_run: bool) -> dict:

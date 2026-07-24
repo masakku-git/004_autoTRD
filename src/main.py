@@ -10,7 +10,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from config.settings import settings
 from src.broker.account import get_account_info
-from src.broker.executor import close_trade_log, create_trade_log, partial_close_trade_log, place_order
+from src.broker.executor_v2 import close_trade_log, create_trade_log, partial_close_trade_log, place_order
 from src.data.fetcher import get_ohlcv
 from src.data.screener import run_screening
 from src.models.base import get_session, init_db
