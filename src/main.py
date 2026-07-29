@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import sys
-from datetime import datetime
 from pathlib import Path
 
 # Ensure project root is in path
@@ -22,14 +21,14 @@ from src.strategy.base import Signal
 from src.strategy.critic import evaluate_signal
 from src.strategy.registry import discover_strategies, get_strategy
 from src.strategy.selector import assess_market_condition, select_strategies
-from src.utils.helpers import is_us_market_day, today_jst
+from src.utils.helpers import is_us_market_day, today_jst, utcnow
 from src.utils.logger import logger
 
 
 def run_daily():
     """Execute the full daily trading workflow."""
     logger.info("=" * 60)
-    logger.info(f"Daily run started at {datetime.utcnow().isoformat()}")
+    logger.info(f"Daily run started at {utcnow().isoformat()}")
     logger.info(f"Mode: {'DRY_RUN' if settings.dry_run else 'LIVE'}")
     logger.info("=" * 60)
 

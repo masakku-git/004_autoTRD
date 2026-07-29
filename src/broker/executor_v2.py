@@ -12,8 +12,6 @@ place_order / create_trade_log / close_trade_log は v1 のものをそのまま
 """
 from __future__ import annotations
 
-from datetime import datetime
-
 from src.broker.executor import (  # noqa: F401  (v1から変更なしの関数を再輸出)
     close_trade_log,
     create_trade_log,
@@ -21,6 +19,7 @@ from src.broker.executor import (  # noqa: F401  (v1から変更なしの関数�
 )
 from src.models.base import get_session
 from src.models.trade import Order, TradeLog
+from src.utils.helpers import utcnow
 from src.utils.logger import logger
 
 
@@ -65,7 +64,7 @@ def partial_close_trade_log(
                 qty_sold = trade.quantity
                 pnl = (actual_exit_price - trade.entry_price) * qty_sold
                 trade.exit_order_id = exit_order.id
-                trade.exit_date = datetime.utcnow().date()
+                trade.exit_date = utcnow().date()
                 trade.exit_price = actual_exit_price
                 trade.pnl = pnl
                 trade.pnl_pct = (
@@ -91,7 +90,7 @@ def partial_close_trade_log(
                     entry_order_id=trade.entry_order_id,
                     exit_order_id=exit_order.id,
                     entry_date=trade.entry_date,
-                    exit_date=datetime.utcnow().date(),
+                    exit_date=utcnow().date(),
                     entry_price=trade.entry_price,
                     exit_price=actual_exit_price,
                     highest_price=trade.highest_price,

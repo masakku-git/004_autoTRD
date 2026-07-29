@@ -9,7 +9,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime
 
 import numpy as np
 import pandas as pd
@@ -17,6 +16,7 @@ import pandas as pd
 from src.models.base import get_session
 from src.models.critic import CriticEvaluation
 from src.strategy.base import Signal
+from src.utils.helpers import utcnow
 from src.utils.logger import logger
 
 # Minimum confidence after critic review to proceed with the trade
@@ -458,7 +458,7 @@ def _save_evaluation(signal: Signal, verdict: CriticVerdict, strategy_name: str)
             verdict="APPROVED" if verdict.approved else "REJECTED",
             verdict_reason=verdict.summary,
             approved=verdict.approved,
-            evaluated_at=datetime.utcnow(),
+            evaluated_at=utcnow(),
         )
         session.add(record)
         session.commit()

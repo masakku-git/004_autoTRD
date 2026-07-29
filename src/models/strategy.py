@@ -8,6 +8,7 @@ from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
 from src.models.base import Base
+from src.utils.helpers import utcnow
 
 
 class StrategyMeta(Base):
@@ -20,7 +21,7 @@ class StrategyMeta(Base):
     version: Mapped[str] = mapped_column(String(10))
     market_regime: Mapped[str] = mapped_column(String(20))
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
 
 
 class BacktestResult(Base):
@@ -38,4 +39,4 @@ class BacktestResult(Base):
     win_rate: Mapped[float] = mapped_column(Float)
     num_trades: Mapped[int] = mapped_column(Integer)
     params_json: Mapped[dict] = mapped_column(JSONB)
-    run_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    run_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)

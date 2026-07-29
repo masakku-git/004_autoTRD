@@ -1,6 +1,6 @@
 """executor_v2.partial_close_trade_log の分割記録テスト"""
 import sys
-from datetime import date, datetime
+from datetime import date
 from pathlib import Path
 
 import pytest
@@ -14,6 +14,7 @@ import src.models.base as models_base  # noqa: E402
 from src.models.base import Base, get_session  # noqa: E402
 from src.models.trade import Order, TradeLog  # noqa: E402
 from src.broker.executor_v2 import partial_close_trade_log  # noqa: E402
+from src.utils.helpers import utcnow  # noqa: E402
 
 
 # critic_evaluations 等が PostgreSQL 専用型 (JSONB) を使うため、
@@ -41,7 +42,7 @@ def _make_order(ticker: str, qty: int, filled_price: float) -> Order:
         price=filled_price,
         status="FILLED",
         filled_price=filled_price,
-        filled_at=datetime.utcnow(),
+        filled_at=utcnow(),
         strategy_name="breakout",
     )
 

@@ -3,12 +3,12 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FuturesTimeoutError
-from datetime import datetime
 
 from config.settings import settings
 from src.models.base import get_session
 from src.models.trade import Order, TradeLog
 from src.strategy.base import Signal
+from src.utils.helpers import utcnow
 from src.utils.logger import logger
 
 
@@ -25,7 +25,7 @@ def place_order(signal: Signal, quantity: int, strategy_name: str = "unknown") -
         price=signal.stop_loss if signal.action == "SELL" else None,
         status="PENDING",
         strategy_name=strategy_name,
-        created_at=datetime.utcnow(),
+        created_at=utcnow(),
     )
 
     # Determine price: use current market for simplicity
@@ -43,7 +43,7 @@ def place_order(signal: Signal, quantity: int, strategy_name: str = "unknown") -
                 f"(strategy: {signal.reason[:50]})"
             )
             order.filled_price = signal.price or order.price
-            order.filled_at = datetime.utcnow()
+            order.filled_at = utcnow()
             order.status = "DRY_RUN"
             session.commit()
             return order
@@ -172,7 +172,7 @@ def create_trade_log(
         trade = TradeLog(
             ticker=signal.ticker,
             entry_order_id=order.id,
-            entry_date=datetime.utcnow().date(),
+            entry_date=utcnow().date(),
             entry_price=entry_price,
             highest_price=entry_price,
             quantity=quantity,
@@ -217,7 +217,7 @@ def close_trade_log(
         total_qty = 0
         for trade in trades:
             trade.exit_order_id = exit_order.id
-            trade.exit_date = datetime.utcnow().date()
+            trade.exit_date = utcnow().date()
             trade.exit_price = actual_exit_price
             trade.pnl = (actual_exit_price - trade.entry_price) * trade.quantity
             trade.pnl_pct = (
@@ -283,7 +283,7 @@ def partial_close_trade_log(
                 qty_sold = trade.quantity
                 pnl = (actual_exit_price - trade.entry_price) * qty_sold
                 trade.exit_order_id = exit_order.id
-                trade.exit_date = datetime.utcnow().date()
+                trade.exit_date = utcnow().date()
                 trade.exit_price = actual_exit_price
                 trade.pnl = pnl
                 trade.pnl_pct = (

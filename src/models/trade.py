@@ -8,6 +8,7 @@ from sqlalchemy import Date, DateTime, Float, ForeignKey, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from src.models.base import Base
+from src.utils.helpers import utcnow
 
 
 class Order(Base):
@@ -25,7 +26,7 @@ class Order(Base):
     filled_price: Mapped[Optional[float]] = mapped_column(Float, nullable=True)  # 約定価格
     filled_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)  # 約定日時
     strategy_name: Mapped[str] = mapped_column(String(50))
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
 
 
 class TradeLog(Base):

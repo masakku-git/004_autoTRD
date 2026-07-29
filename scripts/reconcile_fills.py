@@ -19,7 +19,7 @@ import argparse
 import sys
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FuturesTimeoutError
-from datetime import datetime, timedelta
+from datetime import timedelta
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -30,6 +30,7 @@ from config.settings import settings
 from src.models.base import get_session
 from src.models.trade import Order, TradeLog
 from src.notify.notifier import send_notification
+from src.utils.helpers import utcnow
 from src.utils.logger import logger
 
 # OpenD が応答不能な場合に無期限ハングしないためのタイムアウト（秒）
@@ -64,7 +65,7 @@ def _fetch_broker_orders(days: int) -> dict:
             if days <= 1:
                 ret, df = ctx.order_list_query(trd_env=_trd_env(), acc_id=settings.moomoo_acc_id)
             else:
-                end = datetime.utcnow().date()
+                end = utcnow().date()
                 start = end - timedelta(days=days)
                 ret, df = ctx.history_order_list_query(
                     start=start.isoformat(),
@@ -167,7 +168,7 @@ def reconcile(days: int, dry_run: bool) -> dict:
                 )
                 if not dry_run:
                     order.filled_price = dealt_price
-                    order.filled_at = datetime.utcnow()
+                    order.filled_at = utcnow()
                     order.status = "FILLED"
                     _update_trade_log(session, order, dealt_price)
                 counts["filled"] += 1

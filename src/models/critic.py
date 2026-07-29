@@ -8,6 +8,7 @@ from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
 from src.models.base import Base
+from src.utils.helpers import utcnow
 
 
 class CriticEvaluation(Base):
@@ -30,4 +31,4 @@ class CriticEvaluation(Base):
     verdict: Mapped[str] = mapped_column(String(10))  # APPROVED/REJECTED
     verdict_reason: Mapped[str] = mapped_column(Text)
     approved: Mapped[bool] = mapped_column(Boolean)
-    evaluated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    evaluated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)

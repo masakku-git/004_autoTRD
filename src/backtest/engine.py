@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
 
 import numpy as np
 import pandas as pd
@@ -10,6 +9,7 @@ import pandas as pd
 from src.models.base import get_session
 from src.models.strategy import BacktestResult, StrategyMeta
 from src.strategy.base import BaseStrategy
+from src.utils.helpers import utcnow
 from src.utils.logger import logger
 
 
@@ -193,7 +193,7 @@ def save_backtest_result(
             win_rate=stats.win_rate,
             num_trades=stats.num_trades,
             params_json=strategy.get_params(),
-            run_at=datetime.utcnow(),
+            run_at=utcnow(),
         )
         session.add(result)
         session.commit()
