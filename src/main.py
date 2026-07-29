@@ -546,4 +546,13 @@ def _build_summary(
 
 
 if __name__ == "__main__":
-    run_daily()
+    try:
+        run_daily()
+    except Exception as e:
+        logger.exception("Daily run crashed with an unhandled exception")
+        send_notification(
+            "AutoTRD 実行エラー",
+            f"日次実行が異常終了しました。Slack通知含め処理が完了していない可能性があります。\n\n{type(e).__name__}: {e}",
+            level="error",
+        )
+        raise

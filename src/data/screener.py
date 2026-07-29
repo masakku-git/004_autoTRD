@@ -47,6 +47,11 @@ def screen_ticker(ticker: str, df: pd.DataFrame) -> dict | None:
     last_close = recent["Close"].iloc[-1]
     avg_volume = recent["Volume"].mean()
 
+    # Data quality filter (NaN comparisons are always False, so NaN would
+    # otherwise silently pass the price/volume filters below)
+    if pd.isna(last_close) or pd.isna(avg_volume):
+        return None
+
     # Price filter
     if last_close < MIN_PRICE or last_close > MAX_PRICE:
         return None
