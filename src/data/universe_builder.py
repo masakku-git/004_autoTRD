@@ -34,6 +34,7 @@ import requests
 import yfinance as yf
 
 from config.settings import settings
+from src.notify.notifier import send_notification
 from src.utils.logger import logger
 
 # ── 設定 ───────────────────────────────────────────────────────────
@@ -41,6 +42,11 @@ TOP_N_UNIVERSE   = 50   # ユニバースの最終銘柄数
 MAX_PER_SECTOR   = 8    # セクターあたりの最大銘柄数
 MIN_MARKET_CAP_B = 30.0 # 最小時価総額（十億ドル）
 CACHE_DAYS       = 7    # キャッシュ有効日数
+
+# 時価総額取得の失敗率がこれを超えたら構築異常とみなす
+# （部分失敗した銘柄は market_cap=0 → 30Bフィルタで脱落し、歪んだユニバースが
+#   7日間キャッシュされてしまうため）
+MAX_MARKET_CAP_FAILURE_RATE = 0.3
 
 # 手動除外リスト（上場廃止・流動性問題・取引不可銘柄など）
 EXCLUDED_TICKERS: set[str] = {
@@ -85,7 +91,23 @@ def get_universe(force_refresh: bool = False) -> list[str]:
 
     logger.info("[universe_builder] ユニバースを再構築します（Wikipedia + yfinance）")
     tickers = _build_universe()
-    _save_cache(tickers)
+
+    if tickers is None:
+        # 構築異常（時価総額の大量取得失敗など）。歪んだユニバースを7日間
+        # キャッシュするより、古くても正しいユニバースを使う方が安全。
+        stale = _load_cache(ignore_expiry=True)
+        if stale:
+            logger.warning(
+                f"[universe_builder] 期限切れキャッシュで継続 "
+                f"({len(stale['tickers'])}銘柄, 作成日: {stale['built_at'][:10]})"
+            )
+            return stale["tickers"]
+        return _fallback_universe()
+
+    try:
+        _save_cache(tickers)
+    except Exception as e:
+        logger.error(f"[universe_builder] キャッシュ保存失敗（処理は継続）: {e}")
     return tickers
 
 
@@ -108,8 +130,13 @@ def get_universe_metadata() -> dict | None:
 
 # ── 内部処理 ─────────────────────────────────────────────────────────
 
-def _build_universe() -> list[str]:
-    """S&P500リストを取得し、時価総額・セクター分散でユニバースを構築する。"""
+def _build_universe() -> list[str] | None:
+    """S&P500リストを取得し、時価総額・セクター分散でユニバースを構築する。
+
+    Returns None when the build is unreliable (mass market-cap fetch failures);
+    the caller must then fall back to a cached/static universe instead of
+    persisting a distorted one.
+    """
 
     # 1. S&P500構成銘柄リストを取得
     sp500_df = _fetch_sp500_list()
@@ -123,7 +150,21 @@ def _build_universe() -> list[str]:
     sp500_df = sp500_df[~sp500_df["ticker"].isin(EXCLUDED_TICKERS)].copy()
 
     # 3. 各銘柄の時価総額を取得してフィルタリング
-    sp500_df = _enrich_with_market_cap(sp500_df)
+    sp500_df, failure_rate = _enrich_with_market_cap(sp500_df)
+    if failure_rate > MAX_MARKET_CAP_FAILURE_RATE:
+        logger.error(
+            f"[universe_builder] 時価総額取得失敗率 {failure_rate:.0%} が"
+            f"閾値({MAX_MARKET_CAP_FAILURE_RATE:.0%})を超過"
+        )
+        send_notification(
+            "ユニバース構築異常",
+            f"時価総額の取得失敗率が{failure_rate:.0%}に達したため、"
+            "不正なユニバースの保存を中止しました。\n"
+            "影響: 前回キャッシュ（期限切れ含む）またはフォールバックリストで継続します。\n"
+            "対応: yfinanceのレート制限/障害を確認し、必要なら翌日以降に自然回復を待ってください。",
+            level="warning",
+        )
+        return None
     before = len(sp500_df)
     sp500_df = sp500_df[sp500_df["market_cap_b"] >= MIN_MARKET_CAP_B].copy()
     logger.info(
@@ -194,11 +235,16 @@ def _fetch_sp500_list() -> pd.DataFrame | None:
         return None
 
 
-def _enrich_with_market_cap(df: pd.DataFrame) -> pd.DataFrame:
-    """yfinanceで時価総額を取得してDataFrameに追加する。"""
+def _enrich_with_market_cap(df: pd.DataFrame) -> tuple[pd.DataFrame, float]:
+    """yfinanceで時価総額を取得してDataFrameに追加する。
+
+    Returns (df, failure_rate). 失敗銘柄は market_cap=0 となり30Bフィルタで
+    脱落するため、呼び出し側は failure_rate で構築の信頼性を判定する。
+    """
     market_caps: dict[str, float] = {}
     tickers = df["ticker"].tolist()
     total = len(tickers)
+    failures = 0
 
     logger.info(f"[universe_builder] 時価総額を取得中（{total}銘柄）...")
 
@@ -213,8 +259,9 @@ def _enrich_with_market_cap(df: pd.DataFrame) -> pd.DataFrame:
                 cap = full_info.get("marketCap")
             market_caps[ticker] = float(cap) / 1e9 if cap else 0.0  # 十億ドルに変換
         except Exception as e:
-            logger.debug(f"[universe_builder] {ticker} 時価総額取得失敗: {e}")
+            logger.warning(f"[universe_builder] {ticker} 時価総額取得失敗: {e}")
             market_caps[ticker] = 0.0
+            failures += 1
 
         if i % 50 == 0:
             logger.info(f"[universe_builder] 進捗: {i}/{total}")
@@ -223,7 +270,7 @@ def _enrich_with_market_cap(df: pd.DataFrame) -> pd.DataFrame:
 
     df = df.copy()
     df["market_cap_b"] = df["ticker"].map(market_caps).fillna(0.0)
-    return df
+    return df, failures / max(total, 1)
 
 
 def _select_with_sector_balance(df: pd.DataFrame) -> pd.DataFrame:
@@ -269,8 +316,11 @@ def _find_column(df: pd.DataFrame, candidates: list[str]) -> str | None:
 
 # ── キャッシュ ────────────────────────────────────────────────────────
 
-def _load_cache() -> dict | None:
-    """キャッシュを読み込む。有効期限切れ or 存在しない場合は None を返す。"""
+def _load_cache(ignore_expiry: bool = False) -> dict | None:
+    """キャッシュを読み込む。有効期限切れ or 存在しない場合は None を返す。
+
+    ignore_expiry=True では期限切れでも返す（構築異常時の退避用）。
+    """
     if not _CACHE_PATH.exists():
         return None
     try:
@@ -278,7 +328,7 @@ def _load_cache() -> dict | None:
             data = json.load(f)
 
         built_at = datetime.fromisoformat(data["built_at"])
-        if datetime.now() - built_at > timedelta(days=CACHE_DAYS):
+        if not ignore_expiry and datetime.now() - built_at > timedelta(days=CACHE_DAYS):
             logger.info(
                 f"[universe_builder] キャッシュが{CACHE_DAYS}日を超えています。再取得します"
             )
