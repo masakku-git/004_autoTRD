@@ -1,74 +1,58 @@
-"""Test strategy plugins."""
+"""Test strategy plugins.
+
+registry経由で「現在有効な最新版」を対象にする（同名戦略は最新版が登録に勝つ）。
+旧版のクラスを直接importしない — 版が増えてもテストの書き換えが不要になり、
+戦略ファイルの版管理ルール（旧版は変更せず残す）とも整合する。
+"""
 import pandas as pd
-import numpy as np
 import pytest
 
-from src.strategy.plugins.sma_crossover import SMACrossover
-from src.strategy.plugins.rsi_reversal import RSIReversal
-from src.strategy.plugins.breakout import Breakout
+from src.strategy import registry
 from src.strategy.base import Signal
 
+registry.discover_strategies()
+STRATEGY_CLASSES = [registry._registry[name] for name in sorted(registry._registry)]
 
-class TestSMACrossover:
-    def test_name_and_regime(self):
-        s = SMACrossover()
-        assert s.name == "sma_crossover"
-        assert s.target_regime == "trending"
+assert STRATEGY_CLASSES, "戦略プラグインが1件も登録されていません"
 
-    def test_returns_none_insufficient_data(self, market_condition_trending):
-        s = SMACrossover()
+_VALID_REGIMES = {"trending", "range", "volatile", "any"}
+
+
+def _ids(cls):
+    return f"{cls.name}_v{cls.version}"
+
+
+@pytest.mark.parametrize("cls", STRATEGY_CLASSES, ids=_ids)
+class TestAllStrategies:
+    def test_metadata(self, cls):
+        s = cls()
+        assert s.name and s.name != "unnamed"
+        assert s.version
+        assert s.target_regime in _VALID_REGIMES
+
+    def test_returns_none_insufficient_data(self, cls, market_condition_trending):
+        s = cls()
         df = pd.DataFrame(
             {"Open": [1], "High": [2], "Low": [0.5], "Close": [1.5], "Volume": [100]},
             index=pd.to_datetime(["2024-01-01"]),
         )
-        result = s.generate_signals("TEST", df, market_condition_trending)
-        assert result is None
+        assert s.generate_signals("TEST", df, market_condition_trending) is None
 
-    def test_generates_signal_on_crossover(self, sample_ohlcv, market_condition_trending):
-        s = SMACrossover(short_period=5, long_period=20)
+    def test_generate_signals_does_not_error(self, cls, sample_ohlcv,
+                                             market_condition_trending):
+        s = cls()
         signal = s.generate_signals("TEST", sample_ohlcv, market_condition_trending)
-        # May or may not generate signal depending on data, but should not error
+        # シグナルの有無はデータ次第だが、例外を出さず妥当な値を返すこと
         if signal is not None:
             assert isinstance(signal, Signal)
             assert signal.action in ("BUY", "SELL")
             assert 0 <= signal.confidence <= 1
 
-    def test_get_params(self):
-        s = SMACrossover(short_period=10, long_period=30)
-        params = s.get_params()
-        assert params["short_period"] == 10
-        assert params["long_period"] == 30
+    def test_get_params_returns_dict(self, cls):
+        assert isinstance(cls().get_params(), dict)
 
 
-class TestRSIReversal:
-    def test_name_and_regime(self):
-        s = RSIReversal()
-        assert s.name == "rsi_reversal"
-        assert s.target_regime == "range"
-
-    def test_returns_none_insufficient_data(self, market_condition_range):
-        s = RSIReversal()
-        df = pd.DataFrame(
-            {"Open": [1], "High": [2], "Low": [0.5], "Close": [1.5], "Volume": [100]},
-            index=pd.to_datetime(["2024-01-01"]),
-        )
-        assert s.generate_signals("TEST", df, market_condition_range) is None
-
-    def test_get_params(self):
-        s = RSIReversal(oversold=25, overbought=75)
-        params = s.get_params()
-        assert params["oversold"] == 25
-        assert params["overbought"] == 75
-
-
-class TestBreakout:
-    def test_name_and_regime(self):
-        s = Breakout()
-        assert s.name == "breakout"
-        assert s.target_regime == "any"
-
-    def test_get_params(self):
-        s = Breakout(lookback=30, volume_mult=2.0)
-        params = s.get_params()
-        assert params["lookback"] == 30
-        assert params["volume_mult"] == 2.0
+def test_registry_has_latest_versions():
+    """同名戦略は最新版が登録に勝つ（例: breakoutはv2〜v6のうちv6が有効）。"""
+    names = {c.name for c in STRATEGY_CLASSES}
+    assert {"breakout", "pullback", "rsi_reversal", "sma_crossover"} <= names

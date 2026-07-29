@@ -1,9 +1,28 @@
 """Test risk manager."""
 import pytest
 
+import src.risk.manager as risk_manager
+from config.settings import settings
 from src.broker.account import AccountInfo
 from src.risk.manager import approve_trade, check_daily_loss_limit
 from src.strategy.base import Signal
+
+
+@pytest.fixture(autouse=True)
+def _isolated_settings(monkeypatch):
+    """実行環境の .env / DB に依存しないよう、テストの前提条件を固定する。
+
+    - 各テストの期待値は max_positions=3, リスク2%/trade を前提に書かれているため、
+      .env の値に関わらずここで固定する
+    - approve_trade は ignored_tickers 設定がある環境で trade_log の OPEN 行を
+      DB照会する（_open_trade_tickers）ため、DBなしでも動くようスタブする
+    """
+    monkeypatch.setattr(settings, "max_positions", 3)
+    monkeypatch.setattr(settings, "risk_per_trade_pct", 0.02)
+    monkeypatch.setattr(settings, "max_portfolio_exposure_pct", 0.90)
+    monkeypatch.setattr(settings, "daily_loss_limit_pct", 0.03)
+    monkeypatch.setattr(settings, "ignored_tickers", [])
+    monkeypatch.setattr(risk_manager, "_open_trade_tickers", lambda: set())
 
 
 @pytest.fixture
