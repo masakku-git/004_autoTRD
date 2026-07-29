@@ -8,6 +8,8 @@ from pathlib import Path
 # Ensure project root is in path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+import pandas as pd
+
 from config.settings import settings
 from src.broker.account import get_account_info
 from src.broker.executor_v2 import close_trade_log, create_trade_log, partial_close_trade_log, place_order
@@ -62,170 +64,269 @@ def run_daily():
         send_notification("新規エントリー停止", msg, level="warning")
         block_new_entries = True
 
-    # --- Step 3: 市場環境の判定（S&P500トレンド・VIX・レジーム分類） ---
-    market_condition = assess_market_condition()
-
-    # --- Step 4: 銘柄スクリーニング（50銘柄→上位15銘柄に絞り込み） ---
-    candidates = run_screening()
-    logger.info(f"Screened {len(candidates)} candidates")
-
-    # --- Step 5: シグナル生成 + Devil's Advocate（批判的評価）によるフィルタリング ---
-    strategies = select_strategies(market_condition)
     buy_signals = []
     sell_signals = []
     rejected_signals = []
     forced_exit_orders = []
+    position_errors = []       # 強制エグジット判定に失敗した銘柄
+    sell_signal_errors = []    # SELL判定に失敗した銘柄
+    buy_signal_errors = []     # BUY判定に失敗した銘柄
+    degraded_warnings = []     # 日次レポートに載せる実行時警告
 
-    # --- 強制エグジット（戦略固有チェック / SL / 段階TP / TP / 最大保有期間）---
+    # --- Step 3: 強制エグジット（戦略固有チェック / SL / 段階TP / TP / 最大保有期間）---
+    # 市場環境判定・スクリーニングより先に実行する。外部データ起因の障害が起きても
+    # ポジション保護（損切り）だけは必ず走らせるため。1銘柄の失敗が残りポジションの
+    # 判定を止めないよう、銘柄単位で例外を分離する。
     for pos in account.positions:
         ticker = pos["ticker"].replace("US.", "")
-        df = get_ohlcv(ticker)
-        if df.empty:
-            continue
-        current_price = float(df["Close"].iloc[-1])
-        today_high = float(df["High"].iloc[-1])
-        _update_highest_price(ticker, today_high)
-
-        # TradeLogからSL/TP/エントリー日を取得
-        trade_info = _get_open_trade_info(ticker)
-        if not trade_info:
-            continue
-
-        sl = trade_info.get("stop_loss") or 0
-        tp = trade_info.get("take_profit") or 0
-        tp1 = trade_info.get("take_profit_1") or 0
-        max_hold = trade_info.get("max_hold_days") or 20
-        entry_date = trade_info.get("entry_date")
-        trade_qty = trade_info.get("quantity") or (pos.get("qty") or 0)
-        broker_qty = pos.get("qty") or 0
-
-        # (1) 戦略固有のエグジットチェック
-        suppress_tp = False
-        strategy_name = trade_info.get("strategy_name", "")
         try:
-            strategy = get_strategy(strategy_name)
-            decision = strategy.check_exit(ticker, df, trade_info)
-            if decision is not None:
-                if decision.should_exit:
-                    if broker_qty > 0:
-                        forced_signal = Signal(
-                            ticker=ticker, action="SELL", confidence=1.0,
-                            stop_loss=0, take_profit=0, reason=decision.reason,
-                            price=current_price,
-                        )
-                        order = place_order(forced_signal, broker_qty)
-                        close_trade_log(ticker, order, current_price)
-                        forced_exit_orders.append(f"FORCED-EXIT {broker_qty}x {ticker}: {decision.reason}")
-                        logger.info(f"Strategy exit: {decision.reason}")
-                    continue
-                suppress_tp = decision.suppress_tp
-        except KeyError:
-            pass  # 戦略が見つからない場合はデフォルトロジックを使用
+            df = get_ohlcv(ticker)
+            if df.empty:
+                continue
+            raw_close = df["Close"].iloc[-1]
+            raw_high = df["High"].iloc[-1]
+            if pd.isna(raw_close) or pd.isna(raw_high):
+                # NaNとの比較は常にFalseとなり、SL/TP判定が無音で無効化される
+                msg = (
+                    f"{ticker}: 最新価格がNaNのため損切り/利確判定を実行できません。"
+                    "moomooアプリで手動確認してください。"
+                )
+                logger.error(msg)
+                send_notification("価格データ異常 — 損切り判定不可", msg, level="error")
+                continue
+            current_price = float(raw_close)
+            today_high = float(raw_high)
+            _update_highest_price(ticker, today_high)
 
-        exit_reason = None
+            # TradeLogからSL/TP/エントリー日を取得
+            trade_info = _get_open_trade_info(ticker)
+            if not trade_info:
+                continue
 
-        # (2) ストップロス（常にチェック）
-        if sl > 0 and current_price <= sl:
-            exit_reason = f"ストップロス発動 (SL=${sl:.2f}, 現在=${current_price:.2f})"
+            sl = trade_info.get("stop_loss") or 0
+            tp = trade_info.get("take_profit") or 0
+            tp1 = trade_info.get("take_profit_1") or 0
+            max_hold = trade_info.get("max_hold_days") or 20
+            entry_date = trade_info.get("entry_date")
+            trade_qty = trade_info.get("quantity") or (pos.get("qty") or 0)
+            broker_qty = pos.get("qty") or 0
 
-        # (3) 段階利確（TP1）: 半分を決済
-        elif tp1 > 0 and current_price >= tp1:
-            half_qty = max(trade_qty // 2, 1)
-            if broker_qty > 0 and half_qty < broker_qty:
+            # (1) 戦略固有のエグジットチェック
+            suppress_tp = False
+            strategy_name = trade_info.get("strategy_name", "")
+            try:
+                strategy = get_strategy(strategy_name)
+                decision = strategy.check_exit(ticker, df, trade_info)
+                if decision is not None:
+                    if decision.should_exit:
+                        if broker_qty > 0:
+                            forced_signal = Signal(
+                                ticker=ticker, action="SELL", confidence=1.0,
+                                stop_loss=0, take_profit=0, reason=decision.reason,
+                                price=current_price,
+                            )
+                            order = place_order(forced_signal, broker_qty)
+                            close_trade_log(ticker, order, current_price)
+                            forced_exit_orders.append(f"FORCED-EXIT {broker_qty}x {ticker}: {decision.reason}")
+                            logger.info(f"Strategy exit: {decision.reason}")
+                        continue
+                    suppress_tp = decision.suppress_tp
+            except KeyError:
+                pass  # 戦略が見つからない場合はデフォルトロジックを使用
+
+            exit_reason = None
+
+            # (2) ストップロス（常にチェック）
+            if sl > 0 and current_price <= sl:
+                exit_reason = f"ストップロス発動 (SL=${sl:.2f}, 現在=${current_price:.2f})"
+
+            # (3) 段階利確（TP1）: 半分を決済
+            elif tp1 > 0 and current_price >= tp1:
+                half_qty = max(trade_qty // 2, 1)
+                if broker_qty > 0 and half_qty < broker_qty:
+                    forced_signal = Signal(
+                        ticker=ticker, action="SELL", confidence=1.0,
+                        stop_loss=0, take_profit=0,
+                        reason=f"段階利確TP1到達 (TP1=${tp1:.2f}, 現在=${current_price:.2f})",
+                        price=current_price,
+                    )
+                    order = place_order(forced_signal, half_qty)
+                    partial_close_trade_log(ticker, order, current_price, half_qty)
+                    forced_exit_orders.append(
+                        f"PARTIAL-EXIT {half_qty}x {ticker}: 段階利確TP1=${tp1:.2f}"
+                    )
+                    logger.info(f"Staged TP1: sold {half_qty} of {broker_qty} shares")
+                elif broker_qty > 0:
+                    # 1株しかない場合は全量決済
+                    exit_reason = f"段階利確TP1到達・全量決済 (TP1=${tp1:.2f}, 現在=${current_price:.2f})"
+
+            # (4) 通常利確（suppress_tp=Trueならスキップ）
+            elif not suppress_tp and tp > 0 and current_price >= tp:
+                exit_reason = f"利確ターゲット到達 (TP=${tp:.2f}, 現在=${current_price:.2f})"
+
+            # (5) 最大保有期間
+            elif entry_date and max_hold > 0:
+                holding_days = (today_jst() - entry_date).days
+                if holding_days >= max_hold:
+                    exit_reason = f"最大保有期間{max_hold}日超過 ({holding_days}日経過)"
+
+            if exit_reason and broker_qty > 0:
                 forced_signal = Signal(
                     ticker=ticker, action="SELL", confidence=1.0,
-                    stop_loss=0, take_profit=0,
-                    reason=f"段階利確TP1到達 (TP1=${tp1:.2f}, 現在=${current_price:.2f})",
+                    stop_loss=0, take_profit=0, reason=exit_reason,
                     price=current_price,
                 )
-                order = place_order(forced_signal, half_qty)
-                partial_close_trade_log(ticker, order, current_price, half_qty)
-                forced_exit_orders.append(
-                    f"PARTIAL-EXIT {half_qty}x {ticker}: 段階利確TP1=${tp1:.2f}"
-                )
-                logger.info(f"Staged TP1: sold {half_qty} of {broker_qty} shares")
-            elif broker_qty > 0:
-                # 1株しかない場合は全量決済
-                exit_reason = f"段階利確TP1到達・全量決済 (TP1=${tp1:.2f}, 現在=${current_price:.2f})"
+                order = place_order(forced_signal, broker_qty)
+                close_trade_log(ticker, order, current_price)
+                forced_exit_orders.append(f"FORCED-EXIT {broker_qty}x {ticker}: {exit_reason}")
+                logger.info(f"Forced exit: {exit_reason}")
+        except Exception as e:
+            logger.exception(f"{ticker}: 強制エグジット処理でエラー")
+            position_errors.append(f"{ticker}: {type(e).__name__}: {e}")
 
-        # (4) 通常利確（suppress_tp=Trueならスキップ）
-        elif not suppress_tp and tp > 0 and current_price >= tp:
-            exit_reason = f"利確ターゲット到達 (TP=${tp:.2f}, 現在=${current_price:.2f})"
-
-        # (5) 最大保有期間
-        elif entry_date and max_hold > 0:
-            holding_days = (today_jst() - entry_date).days
-            if holding_days >= max_hold:
-                exit_reason = f"最大保有期間{max_hold}日超過 ({holding_days}日経過)"
-
-        if exit_reason and broker_qty > 0:
-            forced_signal = Signal(
-                ticker=ticker, action="SELL", confidence=1.0,
-                stop_loss=0, take_profit=0, reason=exit_reason,
-                price=current_price,
-            )
-            order = place_order(forced_signal, broker_qty)
-            close_trade_log(ticker, order, current_price)
-            forced_exit_orders.append(f"FORCED-EXIT {broker_qty}x {ticker}: {exit_reason}")
-            logger.info(f"Forced exit: {exit_reason}")
+    if position_errors:
+        send_notification(
+            "保有ポジションの損切り判定エラー",
+            "以下の銘柄で強制エグジット判定（SL/TP/最大保有期間）が実行できませんでした。\n"
+            "該当銘柄の損切りは本日実行されていません。moomooアプリで手動確認してください。\n\n"
+            + "\n".join(position_errors),
+            level="error",
+        )
+        degraded_warnings.append(
+            f"強制エグジット判定エラー: {len(position_errors)}銘柄（Slack通知済み）"
+        )
 
     # 強制エグジット後にアカウント情報を再取得
     if forced_exit_orders:
         account = get_account_info()
 
-    # 保有ポジションに対して売却シグナルをチェック
+    # --- Step 4: 市場環境の判定（S&P500トレンド・VIX・レジーム分類） ---
+    # 判定不能でも売却系は続行する。データ劣化時は安全側として新規エントリーを停止。
+    try:
+        market_condition = assess_market_condition()
+    except Exception:
+        logger.exception("市場環境判定が失敗")
+        market_condition = {
+            "sp500_trend": "neutral",
+            "vix_level": 0.0,
+            "regime": "volatile",
+            "data_degraded": True,
+        }
+    if market_condition.get("data_degraded"):
+        block_new_entries = True
+        send_notification(
+            "市場データ取得失敗 — 新規エントリー停止",
+            "^GSPC/^VIXの価格データが取得できず市場環境を判定できません。\n"
+            "安全のため本日の新規エントリーを停止します（売却・損切りは通常通り実行）。\n"
+            "SELL判定は前回レジームまたは防御的レジーム(volatile)で継続します。",
+            level="warning",
+        )
+        degraded_warnings.append("市場データ劣化のため新規エントリー停止（Slack通知済み）")
+
+    # --- Step 5: 保有ポジションに対して売却シグナルをチェック ---
     # 設計方針: 各ポジションは購入時の戦略でのみ売却判定する（戦略間のクロス介入を防ぐ）
     for pos in account.positions:
         ticker = pos["ticker"].replace("US.", "")
-        df = get_ohlcv(ticker)
-        if df.empty:
-            continue
-        trade_info = _get_open_trade_info(ticker)
-        if not trade_info:
-            continue
-        strategy_name = trade_info.get("strategy_name", "")
         try:
-            strategy = get_strategy(strategy_name)
-        except KeyError:
-            logger.warning(
-                f"{ticker}: 購入戦略 '{strategy_name}' がregistryに無いためSELL判定をスキップ"
-            )
-            continue
-        signal = strategy.generate_signals(ticker, df, market_condition)
-        if signal and signal.action == "SELL":
-            # Critic evaluates SELL signals too (prevents panic selling)
-            verdict = evaluate_signal(signal, df, market_condition, strategy.name)
-            if verdict.approved:
-                signal.confidence = verdict.adjusted_confidence
-                sell_signals.append(signal)
-            else:
-                rejected_signals.append((signal, verdict))
-
-    # スクリーニング通過銘柄に対して買いシグナルをチェック
-    for candidate in candidates:
-        ticker = candidate["ticker"]
-        df = get_ohlcv(ticker, ensure_updated=False)
-        if df.empty:
-            continue
-        for strategy in strategies:
+            df = get_ohlcv(ticker)
+            if df.empty:
+                continue
+            trade_info = _get_open_trade_info(ticker)
+            if not trade_info:
+                continue
+            strategy_name = trade_info.get("strategy_name", "")
+            try:
+                strategy = get_strategy(strategy_name)
+            except KeyError:
+                logger.warning(
+                    f"{ticker}: 購入戦略 '{strategy_name}' がregistryに無いためSELL判定をスキップ"
+                )
+                continue
             signal = strategy.generate_signals(ticker, df, market_condition)
-            if signal and signal.action == "BUY":
-                # Devil's Advocate critically evaluates every BUY signal
+            if signal and signal.action == "SELL":
+                # Critic evaluates SELL signals too (prevents panic selling)
                 verdict = evaluate_signal(signal, df, market_condition, strategy.name)
                 if verdict.approved:
                     signal.confidence = verdict.adjusted_confidence
-                    signal.screen_score = candidate["score"]
-                    buy_signals.append(signal)
+                    sell_signals.append(signal)
                 else:
                     rejected_signals.append((signal, verdict))
-                break
+        except Exception as e:
+            logger.exception(f"{ticker}: SELLシグナル判定でエラー")
+            sell_signal_errors.append(f"{ticker}: {type(e).__name__}: {e}")
+
+    if sell_signal_errors:
+        send_notification(
+            "SELLシグナル判定エラー",
+            "以下の保有銘柄で戦略ベースのSELL判定が実行できませんでした\n"
+            "（SL/TP等の強制エグジット判定は別途実行済みです）。\n\n"
+            + "\n".join(sell_signal_errors),
+            level="error",
+        )
+        degraded_warnings.append(
+            f"SELL判定エラー: {len(sell_signal_errors)}銘柄（Slack通知済み）"
+        )
+
+    # --- Step 6: 銘柄スクリーニング（50銘柄→上位15銘柄に絞り込み） ---
+    # 失敗しても損切り・売却判定（Step 3/5）は実行済み。通知して新規BUYのみスキップ。
+    candidates = []
+    screening_failed = False
+    try:
+        candidates = run_screening()
+        logger.info(f"Screened {len(candidates)} candidates")
+    except Exception as e:
+        screening_failed = True
+        logger.exception("スクリーニング失敗")
+        send_notification(
+            "スクリーニング失敗 — 新規BUYをスキップ",
+            "銘柄スクリーニングが失敗したため、本日の新規エントリーはスキップします。\n"
+            "保有ポジションの損切り・売却判定は実行済みです。\n\n"
+            f"{type(e).__name__}: {e}",
+            level="error",
+        )
+
+    # --- Step 7: スクリーニング通過銘柄に対して買いシグナルをチェック ---
+    strategies = select_strategies(market_condition)
+    for candidate in candidates:
+        ticker = candidate["ticker"]
+        try:
+            df = get_ohlcv(ticker, ensure_updated=False)
+            if df.empty:
+                continue
+            for strategy in strategies:
+                signal = strategy.generate_signals(ticker, df, market_condition)
+                if signal and signal.action == "BUY":
+                    # Devil's Advocate critically evaluates every BUY signal
+                    verdict = evaluate_signal(signal, df, market_condition, strategy.name)
+                    if verdict.approved:
+                        signal.confidence = verdict.adjusted_confidence
+                        signal.screen_score = candidate["score"]
+                        buy_signals.append(signal)
+                    else:
+                        rejected_signals.append((signal, verdict))
+                    break
+        except Exception as e:
+            logger.exception(f"{ticker}: BUYシグナル判定でエラー")
+            buy_signal_errors.append(f"{ticker}: {type(e).__name__}: {e}")
+
+    if buy_signal_errors:
+        send_notification(
+            "BUYシグナル判定エラー",
+            "以下の候補銘柄でBUYシグナル判定が実行できませんでした\n"
+            "（新規エントリー機会の損失のみで、保有ポジションへの影響はありません）。\n\n"
+            + "\n".join(buy_signal_errors),
+            level="warning",
+        )
+        degraded_warnings.append(
+            f"BUY判定エラー: {len(buy_signal_errors)}銘柄（Slack通知済み）"
+        )
 
     logger.info(
         f"Signals: {len(buy_signals)} BUY, {len(sell_signals)} SELL, "
         f"{len(rejected_signals)} REJECTED by critic"
     )
 
-    # --- Step 6: 注文実行（リスク管理チェック後に発注） ---
+    # --- Step 8: 注文実行（リスク管理チェック後に発注） ---
     executed_orders = []   # 成功した注文（dict形式）
     failed_orders = []     # 失敗した注文（dict形式）
     risk_rejected_orders = []
@@ -293,12 +394,14 @@ def run_daily():
         else:
             risk_rejected_orders.append((signal, approval))
 
-    # --- Step 7: 日次レポート作成 & Slack通知 ---
+    # --- Step 9: 日次レポート作成 & Slack通知 ---
     summary = _build_summary(
         account, market_condition, candidates,
         forced_exit_orders, executed_orders, failed_orders, rejected_signals,
         buy_count=len(buy_signals), sell_count=len(sell_signals),
         risk_rejected_orders=risk_rejected_orders,
+        screening_failed=screening_failed,
+        degraded_warnings=degraded_warnings,
     )
     logger.info(summary)
     send_notification("日次トレーディングレポート", summary)
@@ -389,9 +492,11 @@ def _build_summary(
     account, market_condition, candidates,
     forced_exit_orders, executed_orders, failed_orders, rejected_signals=None,
     buy_count: int = 0, sell_count: int = 0, risk_rejected_orders=None,
+    screening_failed: bool = False, degraded_warnings=None,
 ) -> str:
     rejected_signals = rejected_signals or []
     risk_rejected_orders = risk_rejected_orders or []
+    degraded_warnings = degraded_warnings or []
 
     regime_raw = market_condition.get("regime", "")
     trend_raw = market_condition.get("sp500_trend", "")
@@ -409,8 +514,17 @@ def _build_summary(
     mode_str = "DRY_RUN (模擬実行)" if settings.dry_run else "LIVE (本番取引)"
     trade_env_str = "REAL (本番口座)" if settings.moomoo_trade_env == "REAL" else "SIMULATE (模擬口座)"
 
-    lines = [
-        f"日付: {today_jst()}",
+    lines = [f"日付: {today_jst()}"]
+
+    # 実行時警告（スクリーニング失敗=候補0件を「正常0件」と区別して表示する）
+    if screening_failed or degraded_warnings:
+        lines += ["", "【⚠ 実行時警告】"]
+        if screening_failed:
+            lines.append("  スクリーニング失敗のため新規BUYをスキップしました（Slack通知済み）")
+        for w in degraded_warnings:
+            lines.append(f"  {w}")
+
+    lines += [
         "",
         "【市場環境】",
         f"  S&P500トレンド : {trend_ja}",
