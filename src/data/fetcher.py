@@ -16,6 +16,8 @@ from src.utils.logger import logger
 DEFAULT_HISTORY_YEARS = 2
 # Rate limit between yfinance calls
 FETCH_DELAY_SEC = 0.5
+# Columns that must be non-NaN for a row to be cached
+_REQUIRED_COLS = ["Open", "High", "Low", "Close", "Volume"]
 
 
 def get_last_cached_date(ticker: str) -> date | None:
@@ -50,8 +52,25 @@ def fetch_from_yfinance(
         return pd.DataFrame()
 
 
+def _drop_nan_rows(ticker: str, df: pd.DataFrame) -> pd.DataFrame:
+    """OHLCVにNaNを含む行を除外する（NaNがprice_cacheに永続化されるのを防ぐ）。
+
+    yfinanceは取得失敗時に部分的なNaN行を返すことがあり、そのままDBに入ると
+    int(NaN)でのクラッシュや、NaN比較（常にFalse）によるSL/TP判定の無効化を招く。
+    """
+    cols = [c for c in _REQUIRED_COLS if c in df.columns]
+    cleaned = df.dropna(subset=cols)
+    dropped = len(df) - len(cleaned)
+    if dropped:
+        logger.warning(f"{ticker}: NaNを含む{dropped}行をキャッシュ保存から除外")
+    return cleaned
+
+
 def save_to_cache(ticker: str, df: pd.DataFrame) -> int:
     """Save OHLCV DataFrame to DB cache. Returns number of rows inserted."""
+    if df.empty:
+        return 0
+    df = _drop_nan_rows(ticker, df)
     if df.empty:
         return 0
     rows_inserted = 0

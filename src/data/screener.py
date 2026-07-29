@@ -32,10 +32,18 @@ def calculate_atr(df: pd.DataFrame, period: int = 14) -> pd.Series:
 
 
 def calculate_relative_strength(df: pd.DataFrame, period: int = 20) -> float:
-    """Calculate relative strength as percentage return over period."""
+    """Calculate relative strength as percentage return over period.
+
+    Returns NaN when either endpoint is NaN or the base price is zero, so the
+    caller can distinguish "no data" from a genuine 0% return.
+    """
     if len(df) < period:
         return 0.0
-    return (df["Close"].iloc[-1] / df["Close"].iloc[-period] - 1) * 100
+    last = df["Close"].iloc[-1]
+    prev = df["Close"].iloc[-period]
+    if pd.isna(last) or pd.isna(prev) or prev == 0:
+        return float("nan")
+    return (last / prev - 1) * 100
 
 
 def screen_ticker(ticker: str, df: pd.DataFrame) -> dict | None:
@@ -68,8 +76,11 @@ def screen_ticker(ticker: str, df: pd.DataFrame) -> dict | None:
     if atr_pct < MIN_ATR_PCT:
         return None
 
-    # Relative strength
+    # Relative strength (Close.iloc[-LOOKBACK_DAYS] may be NaN even when the
+    # ATR guard above passed, since ATR only looks at the last 14 rows)
     rs = calculate_relative_strength(df, LOOKBACK_DAYS)
+    if pd.isna(rs):
+        return None
 
     return {
         "ticker": ticker,
@@ -100,6 +111,11 @@ def run_screening(
         if result:
             # Composite score: weight RS and ATR
             result["score"] = float(result["relative_strength"] * 0.6 + result["atr_pct"] * 0.4)
+            # Last line of defense: NaN in the JSONB payload crashes the
+            # screening_results insert (PostgreSQL rejects NaN tokens)
+            if pd.isna(result["score"]):
+                logger.warning(f"{ticker}: score=NaNのためスクリーニング除外")
+                continue
             candidates.append(result)
 
     # Sort by composite score descending
