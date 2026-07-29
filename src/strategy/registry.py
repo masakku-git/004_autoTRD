@@ -11,34 +11,51 @@ from src.utils.logger import logger
 _registry: dict[str, type[BaseStrategy]] = {}
 
 
-def discover_strategies() -> None:
-    """Scan plugins/ directory and register all BaseStrategy subclasses."""
+def discover_strategies() -> int:
+    """Scan plugins/ directory and register all BaseStrategy subclasses.
+
+    Returns the number of registered strategies. 0件は「BUY/戦略ベースSELLが
+    一切動かないのに日次レポートは正常に見える」状態なのでSlackへ通知する。
+    """
     global _registry
     _registry.clear()
 
     plugins_dir = pathlib.Path(__file__).parent / "plugins"
-    if not plugins_dir.exists():
+    if plugins_dir.exists():
+        for importer, modname, ispkg in pkgutil.iter_modules([str(plugins_dir)]):
+            if modname.startswith("_"):
+                continue
+            try:
+                module = importlib.import_module(f"src.strategy.plugins.{modname}")
+                for attr_name in dir(module):
+                    obj = getattr(module, attr_name)
+                    if (
+                        isinstance(obj, type)
+                        and issubclass(obj, BaseStrategy)
+                        and obj is not BaseStrategy
+                    ):
+                        _registry[obj.name] = obj
+                        logger.info(f"Registered strategy: {obj.name} v{obj.version}")
+            except Exception as e:
+                logger.error(f"Failed to load plugin {modname}: {e}")
+    else:
         logger.warning(f"Plugins directory not found: {plugins_dir}")
-        return
 
-    for importer, modname, ispkg in pkgutil.iter_modules([str(plugins_dir)]):
-        if modname.startswith("_"):
-            continue
-        try:
-            module = importlib.import_module(f"src.strategy.plugins.{modname}")
-            for attr_name in dir(module):
-                obj = getattr(module, attr_name)
-                if (
-                    isinstance(obj, type)
-                    and issubclass(obj, BaseStrategy)
-                    and obj is not BaseStrategy
-                ):
-                    _registry[obj.name] = obj
-                    logger.info(f"Registered strategy: {obj.name} v{obj.version}")
-        except Exception as e:
-            logger.error(f"Failed to load plugin {modname}: {e}")
+    count = len(_registry)
+    logger.info(f"Total strategies registered: {count}")
+    if count == 0:
+        # 循環import回避のため遅延import（broker/account.pyと同パターン）
+        from src.notify.notifier import send_notification
 
-    logger.info(f"Total strategies registered: {len(_registry)}")
+        send_notification(
+            "戦略プラグイン読み込み失敗",
+            "戦略が1件も登録されませんでした（plugins/全滅）。\n"
+            "影響: 新規BUY・戦略ベースのSELL判定は本日実行されません。\n"
+            "SL/利確/最大保有期間による強制エグジットはデフォルトロジックで継続します。\n"
+            "対応: logs で 'Failed to load plugin' を確認してください。",
+            level="error",
+        )
+    return count
 
 
 def get_strategy(name: str) -> BaseStrategy:
