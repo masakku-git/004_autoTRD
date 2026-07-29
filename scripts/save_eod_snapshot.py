@@ -32,6 +32,7 @@ from sqlalchemy import select  # noqa: E402
 from src.broker.account import get_account_info  # noqa: E402
 from src.models.base import get_session  # noqa: E402
 from src.models.portfolio import PortfolioSnapshot  # noqa: E402
+from src.notify.notifier import send_notification  # noqa: E402
 from src.utils.helpers import today_jst  # noqa: E402
 from src.utils.logger import logger  # noqa: E402
 
@@ -86,4 +87,17 @@ def save_eod_snapshot() -> None:
 
 
 if __name__ == "__main__":
-    save_eod_snapshot()
+    try:
+        save_eod_snapshot()
+    except Exception as e:
+        logger.exception("EOD snapshot failed")
+        send_notification(
+            "EODスナップショット保存失敗",
+            "前営業日の資産スナップショットが記録できませんでした。\n"
+            "影響: 翌営業日の日次損失上限チェック(3%)の基準値が古いままとなり、"
+            "損失上限判定が機能しない可能性があります。\n"
+            "対応: OpenD/DBを確認後、scripts/save_eod_snapshot.py を手動再実行してください。\n\n"
+            f"{type(e).__name__}: {e}",
+            level="error",
+        )
+        raise

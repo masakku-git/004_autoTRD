@@ -17,6 +17,8 @@ from __future__ import annotations
 
 import argparse
 import sys
+from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FuturesTimeoutError
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -27,7 +29,11 @@ from sqlalchemy import select
 from config.settings import settings
 from src.models.base import get_session
 from src.models.trade import Order, TradeLog
+from src.notify.notifier import send_notification
 from src.utils.logger import logger
+
+# OpenD が応答不能な場合に無期限ハングしないためのタイムアウト（秒）
+_OPEND_TIMEOUT_SEC = 30
 
 
 def _trd_env():
@@ -46,27 +52,42 @@ def _open_ctx():
 
 
 def _fetch_broker_orders(days: int) -> dict:
-    """moomoo から注文一覧を取得し、broker_order_id をキーにした dict を返す。"""
-    ctx = _open_ctx()
-    try:
-        if days <= 1:
-            ret, df = ctx.order_list_query(trd_env=_trd_env(), acc_id=settings.moomoo_acc_id)
-        else:
-            end = datetime.utcnow().date()
-            start = end - timedelta(days=days)
-            ret, df = ctx.history_order_list_query(
-                start=start.isoformat(),
-                end=end.isoformat(),
-                trd_env=_trd_env(),
-                acc_id=settings.moomoo_acc_id,
+    """moomoo から注文一覧を取得し、broker_order_id をキーにした dict を返す。
+
+    OpenD が無応答の場合に備え、broker/account.py と同じ
+    ThreadPoolExecutor + タイムアウトのパターンで保護する。
+    """
+
+    def _query() -> dict:
+        ctx = _open_ctx()
+        try:
+            if days <= 1:
+                ret, df = ctx.order_list_query(trd_env=_trd_env(), acc_id=settings.moomoo_acc_id)
+            else:
+                end = datetime.utcnow().date()
+                start = end - timedelta(days=days)
+                ret, df = ctx.history_order_list_query(
+                    start=start.isoformat(),
+                    end=end.isoformat(),
+                    trd_env=_trd_env(),
+                    acc_id=settings.moomoo_acc_id,
+                )
+            if ret != 0:
+                raise RuntimeError(f"moomoo query failed: {df}")
+            if df is None or df.empty:
+                return {}
+            return {str(row["order_id"]): row for _, row in df.iterrows()}
+        finally:
+            ctx.close()
+
+    with ThreadPoolExecutor(max_workers=1) as ex:
+        future = ex.submit(_query)
+        try:
+            return future.result(timeout=_OPEND_TIMEOUT_SEC)
+        except FuturesTimeoutError:
+            raise RuntimeError(
+                f"OpenD接続タイムアウト（{_OPEND_TIMEOUT_SEC}秒）— OpenDのセッションを確認してください"
             )
-        if ret != 0:
-            raise RuntimeError(f"moomoo query failed: {df}")
-        if df is None or df.empty:
-            return {}
-        return {str(row["order_id"]): row for _, row in df.iterrows()}
-    finally:
-        ctx.close()
 
 
 def _update_trade_log(session, order: Order, actual_price: float) -> None:
@@ -186,7 +207,19 @@ def main() -> None:
     parser.add_argument("--days", type=int, default=1, help="遡る日数（1=当日のみ、>=2でhistory_order_list_query）")
     parser.add_argument("--dry-run", action="store_true", help="DBを更新せず差分のみ表示")
     args = parser.parse_args()
-    reconcile(days=args.days, dry_run=args.dry_run)
+    try:
+        reconcile(days=args.days, dry_run=args.dry_run)
+    except Exception as e:
+        logger.exception("reconcile_fills failed")
+        send_notification(
+            "約定情報の照合失敗 (reconcile_fills)",
+            "moomooの実約定価格がOrder/TradeLogに反映されていません。\n"
+            "影響: entry/exit価格と実現損益(pnl)が仮値のままです。\n"
+            "対応: scripts/reconcile_fills.py --days 2 を手動再実行してください。\n\n"
+            f"{type(e).__name__}: {e}",
+            level="error",
+        )
+        raise
 
 
 if __name__ == "__main__":

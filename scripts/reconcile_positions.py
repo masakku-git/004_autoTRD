@@ -38,6 +38,7 @@ from sqlalchemy import select  # noqa: E402
 from src.broker.account import get_account_info  # noqa: E402
 from src.models.base import get_session  # noqa: E402
 from src.models.trade import Order, TradeLog  # noqa: E402
+from src.notify.notifier import send_notification  # noqa: E402
 from src.utils.helpers import today_jst  # noqa: E402
 from src.utils.logger import logger  # noqa: E402
 
@@ -203,7 +204,19 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="trade_log の OPEN を moomoo 実保有で整合")
     parser.add_argument("--dry-run", action="store_true", help="DB を更新せず差分のみ表示")
     args = parser.parse_args()
-    reconcile(dry_run=args.dry_run)
+    try:
+        reconcile(dry_run=args.dry_run)
+    except Exception as e:
+        logger.exception("reconcile_positions failed")
+        send_notification(
+            "ポジション整合チェック失敗 (reconcile_positions)",
+            "trade_logのOPEN状態とmoomoo実保有の整合確認ができませんでした。\n"
+            "影響: ゴーストOPEN行が残ると強制エグジット判定が誤動作する可能性があります。\n"
+            "対応: scripts/reconcile_positions.py --dry-run で差分確認後、手動再実行してください。\n\n"
+            f"{type(e).__name__}: {e}",
+            level="error",
+        )
+        raise
 
 
 if __name__ == "__main__":
