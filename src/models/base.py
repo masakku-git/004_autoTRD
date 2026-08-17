@@ -42,6 +42,9 @@ def _migrate_trade_log(eng) -> None:
         ("take_profit", "FLOAT"),
         ("take_profit_1", "FLOAT"),
         ("max_hold_days", "INTEGER DEFAULT 20"),
+        # 段階利確の消化フラグ。既存行は未消化(0)扱いで問題ない
+        # （TP1消化済みの行は take_profit_1 が NULL 化済みで、TP1判定自体が発火しないため）
+        ("tp1_hit", "BOOLEAN NOT NULL DEFAULT FALSE"),
     ]
     with eng.begin() as conn:
         for col_name, col_type in migrations:

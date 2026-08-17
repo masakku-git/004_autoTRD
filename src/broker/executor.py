@@ -259,8 +259,9 @@ def close_trade_log_by_id(
     - sold_qty が行の数量未満 → 売却分を独立したCLOSED行に分割し、元の行は
       quantity を減らして OPEN のまま継続する。実際に売れた株数だけをPnLに
       計上するため、broker側の数量がDBより少ない場合でもPnLが過大にならない。
-    - consume_tp1=True のとき、OPEN継続する行の take_profit_1 をクリアして
-      連続TP1発動を防ぐ（段階利確用）。
+    - consume_tp1=True のとき、OPEN継続する行に tp1_hit を立てて連続TP1発動を防ぐ
+      （段階利確用）。take_profit_1 の値自体は残す。TP1到達後のみ有効な戦略ロジック
+      （breakout_v6 のRSI決済など）がこの値を参照し続けるため。
     """
     from sqlalchemy import select
 
@@ -319,7 +320,8 @@ def close_trade_log_by_id(
             strategy_name=trade.strategy_name,
             stop_loss=trade.stop_loss,
             take_profit=trade.take_profit,
-            take_profit_1=None,
+            take_profit_1=trade.take_profit_1,
+            tp1_hit=trade.tp1_hit or consume_tp1,
             max_hold_days=trade.max_hold_days,
             notes=(
                 f"部分決済(ロット単位): trade_log id={trade.id} から{qty_sold}株分を分割クローズ"
@@ -329,7 +331,7 @@ def close_trade_log_by_id(
         session.add(closed_part)
         trade.quantity -= qty_sold
         if consume_tp1:
-            trade.take_profit_1 = None  # このロットのTP1は消費済み
+            trade.tp1_hit = True  # このロットのTP1は消費済み（take_profit_1の値は残す）
         trade.notes = _append_note(
             trade.notes,
             note
@@ -357,7 +359,8 @@ def partial_close_trade_log(
 
     - 古い行から順に消化し、qty が消化量以下の行は CLOSED に更新（行ごとPnL算出）。
     - 最後に残った行が部分消化なら quantity を減らして OPEN を継続。
-    - 同銘柄の残OPEN行のTP1も全てクリアし、連続TP1発動を防ぐ。
+    - 同銘柄の残OPEN行にも tp1_hit を立て、連続TP1発動を防ぐ
+      （take_profit_1 の値は残す。TP1到達後のみ有効な戦略ロジックが参照するため）。
     """
     from sqlalchemy import select
 
@@ -382,8 +385,8 @@ def partial_close_trade_log(
 
         for trade in trades:
             if remaining <= 0:
-                # 既に売り切った後の残OPEN行：TP1だけクリア
-                trade.take_profit_1 = None
+                # 既に売り切った後の残OPEN行：TP1消費済みとしてマークするだけ
+                trade.tp1_hit = True
                 continue
             if trade.quantity <= remaining:
                 # 行を全消化 → CLOSED
@@ -411,7 +414,7 @@ def partial_close_trade_log(
                 qty_sold = remaining
                 pnl = (actual_exit_price - trade.entry_price) * qty_sold
                 trade.quantity -= qty_sold
-                trade.take_profit_1 = None  # TP1消費済み
+                trade.tp1_hit = True  # TP1消費済み（take_profit_1の値は残す）
                 note = (
                     f"段階決済(部分): {qty_sold}株 @ ${actual_exit_price:.2f}, "
                     f"PnL=${pnl:.2f}"

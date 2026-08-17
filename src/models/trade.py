@@ -4,7 +4,7 @@ from __future__ import annotations
 from datetime import date, datetime
 from typing import Optional
 
-from sqlalchemy import Date, DateTime, Float, ForeignKey, Integer, String, Text
+from sqlalchemy import Boolean, Date, DateTime, Float, ForeignKey, Integer, String, Text, false
 from sqlalchemy.orm import Mapped, mapped_column
 
 from src.models.base import Base
@@ -51,6 +51,9 @@ class TradeLog(Base):
     stop_loss: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     take_profit: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     take_profit_1: Mapped[Optional[float]] = mapped_column(Float, nullable=True)  # 段階利確の第1ターゲット
+    # 段階利確(TP1)を消化済みか。TP1到達後のみ有効な戦略ロジック（breakout_v6のRSI決済等）が
+    # take_profit_1 の値を参照し続けられるよう、消化の記録は列をNULL化せずこのフラグで行う。
+    tp1_hit: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default=false())
     max_hold_days: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, default=20)
     notes: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     status: Mapped[str] = mapped_column(String(10), default="OPEN")  # OPEN=保有中 / CLOSED=決済済み

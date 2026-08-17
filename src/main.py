@@ -15,7 +15,6 @@ from src.broker.executor_v2 import (
     close_trade_log,
     close_trade_log_by_id,
     create_trade_log,
-    partial_close_trade_log,
     partial_close_trade_log_by_id,
     place_order,
 )
@@ -131,6 +130,7 @@ def run_daily():
                 sl = lot.get("stop_loss") or 0
                 tp = lot.get("take_profit") or 0
                 tp1 = lot.get("take_profit_1") or 0
+                tp1_hit = bool(lot.get("tp1_hit"))
                 max_hold = lot.get("max_hold_days") or 20
                 entry_date = lot.get("entry_date")
                 lot_label = f"{ticker}(entry {entry_date})"
@@ -163,8 +163,10 @@ def run_daily():
                 if sl > 0 and current_price <= sl:
                     exit_reason = f"ストップロス発動 (SL=${sl:.2f}, 現在=${current_price:.2f})"
 
-                # (3) 段階利確（TP1）: このロットの半分を決済
-                elif tp1 > 0 and current_price >= tp1:
+                # (3) 段階利確（TP1）: このロットの半分を決済。
+                # 消化済みかは tp1_hit で判定する（take_profit_1 は
+                # 「TP1到達後のみ有効」な戦略ロジックが参照し続けるため残す）。
+                elif not tp1_hit and tp1 > 0 and current_price >= tp1:
                     half_qty = max(lot_qty // 2, 1)
                     if half_qty < lot_qty:
                         forced_signal = Signal(
@@ -475,6 +477,7 @@ def _get_open_trade_info(ticker: str) -> dict | None:
             "stop_loss": trade.stop_loss or 0,
             "take_profit": trade.take_profit or 0,
             "take_profit_1": trade.take_profit_1 or 0,
+            "tp1_hit": bool(trade.tp1_hit),
             "max_hold_days": trade.max_hold_days or 20,
             "entry_date": trade.entry_date,
             "entry_price": trade.entry_price,
@@ -506,6 +509,7 @@ def _get_open_trades(ticker: str) -> list[dict]:
                 "stop_loss": trade.stop_loss or 0,
                 "take_profit": trade.take_profit or 0,
                 "take_profit_1": trade.take_profit_1 or 0,
+                "tp1_hit": bool(trade.tp1_hit),
                 "max_hold_days": trade.max_hold_days or 20,
                 "entry_date": trade.entry_date,
                 "entry_price": trade.entry_price,

@@ -70,7 +70,6 @@ def patched(monkeypatch):
         or FakeOrder(),
     )
     monkeypatch.setattr(main, "close_trade_log", lambda *a, **kw: None)
-    monkeypatch.setattr(main, "partial_close_trade_log", lambda *a, **kw: None)
     monkeypatch.setattr(
         main, "close_trade_log_by_id",
         lambda trade_id, order, price, sold_qty=None, **kw: captured["closes"].append(
@@ -187,6 +186,38 @@ def test_each_lot_exits_on_its_own_sl_tp1(patched, monkeypatch):
     assert patched["orders"] == [("DDD", "SELL", 4), ("DDD", "SELL", 3)]
     assert patched["closes"] == [(1, 4)]
     assert patched["partial_closes"] == [(2, 3)]
+
+
+def test_tp1_not_refired_but_target_value_kept(patched, monkeypatch):
+    """TP1消化済みロットは再発動しない（take_profit_1 をNULL化せず tp1_hit で判定）。"""
+    account = FakeAccount(positions=[{"ticker": "US.HHH", "qty": 6}])
+    monkeypatch.setattr(main, "get_account_info", lambda: account)
+    monkeypatch.setattr(main, "get_ohlcv", lambda t, **kw: _ohlcv(close=50.0))
+
+    seen = {}
+
+    class ExitAwareStrategy:
+        name = "tp1_aware"
+
+        def check_exit(self, ticker, df, trade_info):
+            seen["take_profit_1"] = trade_info.get("take_profit_1")
+            return None
+
+        def generate_signals(self, ticker, df, mc):
+            return None
+
+    monkeypatch.setattr(main, "get_strategy", lambda name: ExitAwareStrategy())
+    monkeypatch.setattr(
+        main, "_get_open_trades",
+        lambda t: [_lot(3, qty=6, days_ago=2, take_profit_1=45.0, tp1_hit=True)],
+    )
+
+    main.run_daily()
+
+    assert patched["orders"] == []          # TP1は再発動しない
+    assert patched["partial_closes"] == []
+    # TP1到達後のみ有効な戦略ロジックが参照できるよう、目標値自体は渡される
+    assert seen["take_profit_1"] == 45.0
 
 
 def test_lot_qty_capped_by_broker_quantity(patched, monkeypatch):

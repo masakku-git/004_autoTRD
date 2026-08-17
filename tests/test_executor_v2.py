@@ -99,10 +99,11 @@ def test_partial_close_records_pnl_in_split_row():
         assert closed_row.exit_order_id == exit_order_id
         assert closed_row.strategy_name == "breakout"
 
-        # 元の行は残3株でOPEN継続、TP1はクリア
+        # 元の行は残3株でOPEN継続、TP1は消化済みフラグで記録（値は残す）
         assert open_row.quantity == 3
         assert open_row.pnl is None
-        assert open_row.take_profit_1 is None
+        assert open_row.tp1_hit is True
+        assert open_row.take_profit_1 == pytest.approx(110.0)
 
         # 集計: pnl列の合計に段階利確分が反映される
         total = sum(r.pnl or 0 for r in rows)
@@ -131,10 +132,11 @@ def test_partial_close_full_row_consumption_unchanged():
         assert len(rows) == 3  # 分割行は増えない（行を丸ごと消化）
         assert rows[0].status == "CLOSED"
         assert rows[0].pnl == pytest.approx(374.0 - 348.0)
-        # 残り2行はOPENのままTP1クリア
+        # 残り2行はOPENのまま、TP1は消化済みフラグで記録（値は残す）
         for r in rows[1:]:
             assert r.status == "OPEN"
-            assert r.take_profit_1 is None
+            assert r.tp1_hit is True
+            assert r.take_profit_1 == pytest.approx(110.0)
 
 
 def test_partial_close_fifo_across_rows_with_split():
@@ -234,8 +236,10 @@ def test_partial_close_by_id_consumes_only_its_own_tp1():
         lot1 = session.get(TradeLog, lot1_id)
         lot2 = session.get(TradeLog, lot2_id)
         assert lot1.quantity == 2 and lot1.status == "OPEN"
-        assert lot1.take_profit_1 is None      # 自ロットのTP1のみ消費
-        assert lot2.take_profit_1 == pytest.approx(110.0)  # 他ロットは無傷
+        assert lot1.tp1_hit is True                        # 自ロットのTP1のみ消費
+        assert lot1.take_profit_1 == pytest.approx(110.0)  # 値は残す（TP1到達後ロジック用）
+        assert lot2.tp1_hit is False                       # 他ロットは無傷
+        assert lot2.take_profit_1 == pytest.approx(110.0)
 
 
 def test_close_by_id_ignores_already_closed_lot():

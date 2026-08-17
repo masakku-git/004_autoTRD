@@ -421,6 +421,7 @@ class SimulatedPortfolio:
                "stop_loss": stop_loss, "take_profit": take_profit,
                "take_profit_1": take_profit_1,
                "max_hold_days": max_hold_days,
+               "tp1_hit": False,
                "highest_price": price}
         self.positions.append(pos)
         return pos
@@ -529,13 +530,13 @@ def simulate_one_day(
 
         # 段階利確TP1到達（半分決済）
         tp1 = pos.get("take_profit_1", 0)
-        if tp1 > 0 and price >= tp1:
+        if not pos.get("tp1_hit") and tp1 > 0 and price >= tp1:
             half_qty = max(1, pos["qty"] // 2)
             if half_qty < pos["qty"]:
                 partial_pnl = (price - pos["entry_price"]) * half_qty
                 portfolio.cash += half_qty * price
                 pos["qty"] -= half_qty
-                pos["take_profit_1"] = 0  # TP1消費済み
+                pos["tp1_hit"] = True  # TP1消費済み（本番同様、目標値自体は残す）
                 day_report["executed"].append(
                     f"TAKE-PROFIT-1 {half_qty}x {ticker} @ ${price:.2f} "
                     f"(段階利確 PnL: ${partial_pnl:+.2f})")
@@ -559,7 +560,11 @@ def simulate_one_day(
             if df is not None:
                 df_slice = df[df.index <= pd.Timestamp(sim_date)]
                 if not df_slice.empty:
+                    # take_profit_1 / tp1_hit も渡す。TP1到達後のみ有効な戦略ロジック
+                    # （breakout_v6のRSI決済）が本番と同じ条件で動くようにするため。
                     trade_info = {"take_profit": tp, "stop_loss": sl,
+                                    "take_profit_1": tp1,
+                                    "tp1_hit": bool(pos.get("tp1_hit")),
                                     "entry_price": pos["entry_price"],
                                     "highest_price": pos.get("highest_price", pos["entry_price"])}
                     exit_decision = getattr(strategy, 'check_exit', lambda *a: None)(ticker, df_slice, trade_info)

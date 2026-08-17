@@ -50,6 +50,7 @@ TABLES = {
             ("stop_loss",       "FLOAT",      "",     "NULL", "ストップロス価格"),
             ("take_profit",     "FLOAT",      "",     "NULL", "利確ターゲット価格"),
             ("take_profit_1",   "FLOAT",      "",     "NULL", "段階利確 第1ターゲット"),
+            ("tp1_hit",         "BOOLEAN",    "",     "FALSE","段階利確を消化済みか"),
             ("max_hold_days",   "INTEGER",    "",     "NULL", "最大保有日数（デフォルト20）"),
             ("notes",           "TEXT",       "",     "NULL", "メモ（エグジット理由等）"),
             ("status",          "VARCHAR(10)","",     "",     "OPEN / CLOSED"),
