@@ -243,6 +243,113 @@ def close_trade_log(
             )
 
 
+def close_trade_log_by_id(
+    trade_id: int,
+    exit_order: Order,
+    exit_price: float,
+    sold_qty: int | None = None,
+    consume_tp1: bool = False,
+    note: str | None = None,
+) -> None:
+    """指定した1つのTradeLog行（ロット）だけを決済する。他ロットには一切触れない。
+
+    ロット単位のSL/TP判定用（ティッカー単位でまとめて閉じる close_trade_log とは別系統）。
+
+    - sold_qty=None または行の数量以上 → 行全体をCLOSED。
+    - sold_qty が行の数量未満 → 売却分を独立したCLOSED行に分割し、元の行は
+      quantity を減らして OPEN のまま継続する。実際に売れた株数だけをPnLに
+      計上するため、broker側の数量がDBより少ない場合でもPnLが過大にならない。
+    - consume_tp1=True のとき、OPEN継続する行の take_profit_1 をクリアして
+      連続TP1発動を防ぐ（段階利確用）。
+    """
+    from sqlalchemy import select
+
+    with get_session() as session:
+        trade = session.execute(
+            select(TradeLog).where(TradeLog.id == trade_id, TradeLog.status == "OPEN")
+        ).scalar_one_or_none()
+        if not trade:
+            logger.warning(f"close_trade_log_by_id: trade_id={trade_id} が見つからないか既にCLOSED")
+            return
+
+        actual_exit_price = exit_order.filled_price or exit_price
+        qty_sold = trade.quantity if sold_qty is None else min(sold_qty, trade.quantity)
+        if qty_sold <= 0:
+            logger.warning(
+                f"close_trade_log_by_id: trade_id={trade_id} の売却数量が0のため何もしません"
+            )
+            return
+
+        pnl = (actual_exit_price - trade.entry_price) * qty_sold
+        pnl_pct = (
+            (actual_exit_price / trade.entry_price - 1) * 100 if trade.entry_price else 0
+        )
+
+        if qty_sold >= trade.quantity:
+            trade.exit_order_id = exit_order.id
+            trade.exit_date = utcnow().date()
+            trade.exit_price = actual_exit_price
+            trade.pnl = pnl
+            trade.pnl_pct = pnl_pct
+            trade.status = "CLOSED"
+            trade.notes = _append_note(
+                trade.notes,
+                note or f"ロット全量決済: {qty_sold}株 @ ${actual_exit_price:.2f}, PnL=${pnl:.2f}",
+            )
+            session.commit()
+            logger.info(
+                f"Trade closed (lot id={trade_id}): {trade.ticker} "
+                f"{qty_sold}株 PnL=${pnl:.2f} ({pnl_pct:.1f}%)"
+            )
+            return
+
+        # 部分決済: 売却分を別のCLOSED行に切り出し、元の行はOPENのまま数量を減らす
+        closed_part = TradeLog(
+            ticker=trade.ticker,
+            entry_order_id=trade.entry_order_id,
+            exit_order_id=exit_order.id,
+            entry_date=trade.entry_date,
+            exit_date=utcnow().date(),
+            entry_price=trade.entry_price,
+            exit_price=actual_exit_price,
+            highest_price=trade.highest_price,
+            quantity=qty_sold,
+            pnl=pnl,
+            pnl_pct=pnl_pct,
+            strategy_name=trade.strategy_name,
+            stop_loss=trade.stop_loss,
+            take_profit=trade.take_profit,
+            take_profit_1=None,
+            max_hold_days=trade.max_hold_days,
+            notes=(
+                f"部分決済(ロット単位): trade_log id={trade.id} から{qty_sold}株分を分割クローズ"
+            ),
+            status="CLOSED",
+        )
+        session.add(closed_part)
+        trade.quantity -= qty_sold
+        if consume_tp1:
+            trade.take_profit_1 = None  # このロットのTP1は消費済み
+        trade.notes = _append_note(
+            trade.notes,
+            note
+            or (
+                f"部分決済(ロット単位): {qty_sold}株 @ ${actual_exit_price:.2f}, "
+                f"PnL=${pnl:.2f} → 分割CLOSED行に記録（残{trade.quantity}株）"
+            ),
+        )
+        session.commit()
+        logger.info(
+            f"Partial close (lot id={trade_id}): {trade.ticker} "
+            f"sold {qty_sold}, remaining {trade.quantity}, PnL=${pnl:.2f}"
+        )
+
+
+def _append_note(existing: str | None, note: str) -> str:
+    """TradeLog.notes に監査用の1行を追記する。"""
+    return f"{existing or ''}\n{note}".strip()
+
+
 def partial_close_trade_log(
     ticker: str, exit_order: Order, exit_price: float, sold_qty: int
 ) -> None:

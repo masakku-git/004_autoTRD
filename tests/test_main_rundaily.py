@@ -40,7 +40,7 @@ def _ohlcv(close: float, rows: int = 30) -> pd.DataFrame:
 @pytest.fixture
 def patched(monkeypatch):
     """Patch every external dependency of run_daily; return the capture dict."""
-    captured = {"notifications": [], "orders": []}
+    captured = {"notifications": [], "orders": [], "closes": [], "partial_closes": []}
 
     monkeypatch.setattr(main, "is_us_market_day", lambda: True)
     monkeypatch.setattr(main, "init_db", lambda: None)
@@ -48,6 +48,7 @@ def patched(monkeypatch):
     monkeypatch.setattr(main, "_get_previous_equity", lambda: 0.0)
     monkeypatch.setattr(main, "_update_highest_price", lambda t, h: None)
     monkeypatch.setattr(main, "_get_open_trade_info", lambda t: None)
+    monkeypatch.setattr(main, "_get_open_trades", lambda t: [])
     monkeypatch.setattr(
         main, "send_notification",
         lambda title, message, level="info": captured["notifications"].append(
@@ -70,6 +71,19 @@ def patched(monkeypatch):
     )
     monkeypatch.setattr(main, "close_trade_log", lambda *a, **kw: None)
     monkeypatch.setattr(main, "partial_close_trade_log", lambda *a, **kw: None)
+    monkeypatch.setattr(
+        main, "close_trade_log_by_id",
+        lambda trade_id, order, price, sold_qty=None, **kw: captured["closes"].append(
+            (trade_id, sold_qty)
+        ),
+    )
+    monkeypatch.setattr(
+        main, "partial_close_trade_log_by_id",
+        lambda trade_id, order, price, sold_qty, **kw: captured["partial_closes"].append(
+            (trade_id, sold_qty)
+        ),
+    )
+    monkeypatch.setattr(main, "_get_open_qty", lambda t: 0)
     return captured
 
 
@@ -104,13 +118,16 @@ def test_forced_exit_isolated_per_ticker(patched, monkeypatch):
 
     monkeypatch.setattr(main, "get_ohlcv", fake_ohlcv)
     monkeypatch.setattr(
-        main, "_get_open_trade_info",
-        lambda t: {
-            "stop_loss": 60.0, "take_profit": 0, "take_profit_1": 0,
-            "max_hold_days": 20, "entry_date": date.today() - timedelta(days=2),
-            "entry_price": 65.0, "highest_price": 65.0,
-            "quantity": 5, "strategy_name": "missing_strategy",
-        },
+        main, "_get_open_trades",
+        lambda t: [
+            {
+                "id": 1,
+                "stop_loss": 60.0, "take_profit": 0, "take_profit_1": 0,
+                "max_hold_days": 20, "entry_date": date.today() - timedelta(days=2),
+                "entry_price": 65.0, "highest_price": 65.0,
+                "quantity": 5, "strategy_name": "missing_strategy",
+            }
+        ],
     )
 
     main.run_daily()
@@ -138,6 +155,115 @@ def test_nan_price_skips_sl_check_with_notification(patched, monkeypatch):
     assert patched["orders"] == []
     titles = [t for t, _, _ in patched["notifications"]]
     assert any("価格データ異常" in t for t in titles)
+
+
+def _lot(lot_id: int, qty: int, days_ago: int, **overrides) -> dict:
+    lot = {
+        "id": lot_id,
+        "stop_loss": 0.0, "take_profit": 0.0, "take_profit_1": 0.0,
+        "max_hold_days": 20, "entry_date": date.today() - timedelta(days=days_ago),
+        "entry_price": 45.0, "highest_price": 55.0,
+        "quantity": qty, "strategy_name": "missing_strategy",
+    }
+    lot.update(overrides)
+    return lot
+
+
+def test_each_lot_exits_on_its_own_sl_tp1(patched, monkeypatch):
+    """同一銘柄の複数ロットが、それぞれのSL/TP1で独立に決済される。"""
+    account = FakeAccount(positions=[{"ticker": "US.DDD", "qty": 10}])
+    monkeypatch.setattr(main, "get_account_info", lambda: account)
+    monkeypatch.setattr(main, "get_ohlcv", lambda t, **kw: _ohlcv(close=50.0))
+    monkeypatch.setattr(
+        main, "_get_open_trades",
+        lambda t: [
+            _lot(1, qty=4, days_ago=5, stop_loss=60.0),    # 現在50 <= SL60 → 全量決済
+            _lot(2, qty=6, days_ago=2, take_profit_1=45.0),  # 現在50 >= TP1 45 → 半分決済
+        ],
+    )
+
+    main.run_daily()
+
+    assert patched["orders"] == [("DDD", "SELL", 4), ("DDD", "SELL", 3)]
+    assert patched["closes"] == [(1, 4)]
+    assert patched["partial_closes"] == [(2, 3)]
+
+
+def test_lot_qty_capped_by_broker_quantity(patched, monkeypatch):
+    """broker数量がDBより少ない場合、売却株数もPnL計上も実数量に合わせる。"""
+    account = FakeAccount(positions=[{"ticker": "US.EEE", "qty": 5}])
+    monkeypatch.setattr(main, "get_account_info", lambda: account)
+    monkeypatch.setattr(main, "get_ohlcv", lambda t, **kw: _ohlcv(close=50.0))
+    monkeypatch.setattr(
+        main, "_get_open_trades",
+        lambda t: [_lot(7, qty=10, days_ago=3, stop_loss=60.0)],
+    )
+
+    main.run_daily()
+
+    assert patched["orders"] == [("EEE", "SELL", 5)]
+    # DB上の10株ではなく、実際に売れた5株だけをCLOSE対象にする
+    assert patched["closes"] == [(7, 5)]
+
+
+def test_held_lot_consumes_broker_quantity(patched, monkeypatch):
+    """決済しないロットもbroker数量を占有し、後続ロットが二重売りしない。"""
+    account = FakeAccount(positions=[{"ticker": "US.FFF", "qty": 10}])
+    monkeypatch.setattr(main, "get_account_info", lambda: account)
+    monkeypatch.setattr(main, "get_ohlcv", lambda t, **kw: _ohlcv(close=50.0))
+    monkeypatch.setattr(
+        main, "_get_open_trades",
+        lambda t: [
+            _lot(1, qty=10, days_ago=3),                   # エグジット条件なし＝保有継続
+            _lot(2, qty=10, days_ago=1, stop_loss=60.0),   # SL該当だが割り当てる株数が無い
+        ],
+    )
+
+    main.run_daily()
+
+    assert patched["orders"] == []
+    assert patched["closes"] == []
+
+
+def test_sell_signal_qty_capped_by_open_lots(patched, monkeypatch):
+    """Step 3で決済済みのロット分をStep 8のSELLが二重に売らない。"""
+    account = FakeAccount(positions=[{"ticker": "US.GGG", "qty": 10}])
+    monkeypatch.setattr(main, "get_account_info", lambda: account)
+    monkeypatch.setattr(main, "get_ohlcv", lambda t, **kw: _ohlcv(close=50.0))
+    monkeypatch.setattr(
+        main, "_get_open_trade_info",
+        lambda t: _lot(2, qty=6, days_ago=1),
+    )
+    # Step 3で4株分のロットを決済済み → trade_log上のOPENは6株だけ
+    monkeypatch.setattr(main, "_get_open_qty", lambda t: 6)
+
+    class SellStrategy:
+        name = "sell_strategy"
+
+        def generate_signals(self, ticker, df, mc):
+            return main.Signal(
+                ticker=ticker, action="SELL", confidence=1.0,
+                stop_loss=0, take_profit=0, reason="test sell", price=50.0,
+            )
+
+        def check_exit(self, ticker, df, trade_info):
+            return None
+
+    monkeypatch.setattr(main, "get_strategy", lambda name: SellStrategy())
+    monkeypatch.setattr(
+        main, "evaluate_signal",
+        lambda s, df, mc, name: type("V", (), {"approved": True, "adjusted_confidence": 1.0})(),
+    )
+    monkeypatch.setattr(
+        main, "approve_trade",
+        lambda s, acc, mc: type("A", (), {"approved": True, "quantity": 0, "reason": ""})(),
+    )
+
+    main.run_daily()
+
+    # 口座上の10株ではなく、DB上OPENな6株だけを売る
+    assert ("GGG", "SELL", 6) in patched["orders"]
+    assert ("GGG", "SELL", 10) not in patched["orders"]
 
 
 def test_degraded_market_blocks_new_entries(patched, monkeypatch):

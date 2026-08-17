@@ -13,7 +13,11 @@ from sqlalchemy.orm import sessionmaker  # noqa: E402
 import src.models.base as models_base  # noqa: E402
 from src.models.base import Base, get_session  # noqa: E402
 from src.models.trade import Order, TradeLog  # noqa: E402
-from src.broker.executor_v2 import partial_close_trade_log  # noqa: E402
+from src.broker.executor_v2 import (  # noqa: E402
+    close_trade_log_by_id,
+    partial_close_trade_log,
+    partial_close_trade_log_by_id,
+)
 from src.utils.helpers import utcnow  # noqa: E402
 
 
@@ -162,3 +166,85 @@ def test_partial_close_fifo_across_rows_with_split():
         # 行2の残り3株はOPEN
         assert open_rows[0].quantity == 3
         assert open_rows[0].pnl is None
+
+
+# --- ロット単位クローズ (close_trade_log_by_id / partial_close_trade_log_by_id) ---
+
+
+def _seed_two_lots(ticker: str) -> tuple[int, int, Order]:
+    """同一銘柄の2ロット（3株/5株）と売り注文を作り、(lot1_id, lot2_id, exit_order)を返す"""
+    with get_session() as session:
+        entry = Order(ticker=ticker, side="BUY", order_type="LIMIT", quantity=8,
+                      price=100.0, status="FILLED", filled_price=100.0,
+                      strategy_name="breakout")
+        session.add(entry)
+        session.flush()
+        lot1 = _make_open_trade(ticker, 3, 100.0, entry.id, date(2026, 7, 1))
+        lot2 = _make_open_trade(ticker, 5, 108.0, entry.id, date(2026, 7, 5))
+        session.add_all([lot1, lot2])
+        exit_order = _make_order(ticker, 3, 120.0)
+        session.add(exit_order)
+        session.commit()
+        return lot1.id, lot2.id, exit_order
+
+
+def test_close_by_id_touches_only_that_lot():
+    lot1_id, lot2_id, exit_order = _seed_two_lots("NVDA")
+
+    close_trade_log_by_id(lot1_id, exit_order, 120.0, sold_qty=3)
+
+    with get_session() as session:
+        lot1 = session.get(TradeLog, lot1_id)
+        lot2 = session.get(TradeLog, lot2_id)
+        assert lot1.status == "CLOSED"
+        assert lot1.pnl == pytest.approx((120.0 - 100.0) * 3)
+        assert lot1.notes and "全量決済" in lot1.notes
+        # もう一方のロットは無傷（TP1も残る）
+        assert lot2.status == "OPEN"
+        assert lot2.quantity == 5
+        assert lot2.take_profit_1 == pytest.approx(110.0)
+
+
+def test_close_by_id_with_short_qty_splits_and_keeps_rest_open():
+    """broker数量がDBより少ない場合、売れた分だけをPnL計上し残りはOPENで残す"""
+    lot1_id, _, exit_order = _seed_two_lots("AMD")
+
+    close_trade_log_by_id(lot1_id, exit_order, 120.0, sold_qty=1)
+
+    with get_session() as session:
+        lot1 = session.get(TradeLog, lot1_id)
+        split = session.query(TradeLog).filter(
+            TradeLog.status == "CLOSED", TradeLog.ticker == "AMD"
+        ).one()
+        # 3株分ではなく実際に売れた1株分だけがPnLになる
+        assert split.quantity == 1
+        assert split.pnl == pytest.approx(120.0 - 100.0)
+        # 元のロットは残2株でOPEN継続、SL/TP判定用のTP1も維持
+        assert lot1.status == "OPEN"
+        assert lot1.quantity == 2
+        assert lot1.take_profit_1 == pytest.approx(110.0)
+
+
+def test_partial_close_by_id_consumes_only_its_own_tp1():
+    lot1_id, lot2_id, exit_order = _seed_two_lots("MSFT")
+
+    partial_close_trade_log_by_id(lot1_id, exit_order, 120.0, 1)
+
+    with get_session() as session:
+        lot1 = session.get(TradeLog, lot1_id)
+        lot2 = session.get(TradeLog, lot2_id)
+        assert lot1.quantity == 2 and lot1.status == "OPEN"
+        assert lot1.take_profit_1 is None      # 自ロットのTP1のみ消費
+        assert lot2.take_profit_1 == pytest.approx(110.0)  # 他ロットは無傷
+
+
+def test_close_by_id_ignores_already_closed_lot():
+    lot1_id, _, exit_order = _seed_two_lots("TSLA")
+    close_trade_log_by_id(lot1_id, exit_order, 120.0, sold_qty=3)
+
+    close_trade_log_by_id(lot1_id, exit_order, 130.0, sold_qty=3)  # 二重呼び出し
+
+    with get_session() as session:
+        lot1 = session.get(TradeLog, lot1_id)
+        assert lot1.exit_price == pytest.approx(120.0)  # 上書きされない
+        assert session.query(TradeLog).filter(TradeLog.ticker == "TSLA").count() == 2

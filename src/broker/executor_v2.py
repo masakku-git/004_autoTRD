@@ -14,6 +14,7 @@ from __future__ import annotations
 
 from src.broker.executor import (  # noqa: F401  (v1から変更なしの関数を再輸出)
     close_trade_log,
+    close_trade_log_by_id,
     create_trade_log,
     place_order,
 )
@@ -128,3 +129,17 @@ def partial_close_trade_log(
             f"Partial close: {ticker} sold {sold_qty - remaining} shares, "
             f"PnL=${total_pnl:.2f}"
         )
+
+
+def partial_close_trade_log_by_id(
+    trade_id: int, exit_order: Order, exit_price: float, sold_qty: int
+) -> None:
+    """ロット単位の段階決済: 指定行だけを消化し、他ロットのTP1には触れない。
+
+    partial_close_trade_log（ティッカー単位・FIFO・全OPEN行のTP1をクリア）とは異なり、
+    ロットごとに独立してSL/TP1/TPを判定する運用向け。他ロットの状態は一切変更しない。
+    決済処理そのものは close_trade_log_by_id と共通で、TP1消費のみここで指定する。
+    """
+    close_trade_log_by_id(
+        trade_id, exit_order, exit_price, sold_qty=sold_qty, consume_tp1=True
+    )

@@ -11,7 +11,14 @@ import pandas as pd
 
 from config.settings import settings
 from src.broker.account import get_account_info
-from src.broker.executor_v2 import close_trade_log, create_trade_log, partial_close_trade_log, place_order
+from src.broker.executor_v2 import (
+    close_trade_log,
+    close_trade_log_by_id,
+    create_trade_log,
+    partial_close_trade_log,
+    partial_close_trade_log_by_id,
+    place_order,
+)
 from src.data.fetcher import get_ohlcv
 from src.data.screener import run_screening
 from src.models.base import get_session, init_db
@@ -76,6 +83,10 @@ def run_daily():
     # 市場環境判定・スクリーニングより先に実行する。外部データ起因の障害が起きても
     # ポジション保護（損切り）だけは必ず走らせるため。1銘柄の失敗が残りポジションの
     # 判定を止めないよう、銘柄単位で例外を分離する。
+    #
+    # 同一銘柄を複数回に分けてエントリーした場合、trade_logにはOPEN行が複数存在する。
+    # 各行（ロット）はエントリー日ごとに個別のSL/TP/TP1を持つため、ロット単位で判定する
+    # （以前は最新ロットのSL/TPしか見ておらず、古いロットのTP1到達を検知できなかった）。
     for pos in account.positions:
         ticker = pos["ticker"].replace("US.", "")
         try:
@@ -97,88 +108,102 @@ def run_daily():
             today_high = float(raw_high)
             _update_highest_price(ticker, today_high)
 
-            # TradeLogからSL/TP/エントリー日を取得
-            trade_info = _get_open_trade_info(ticker)
-            if not trade_info:
+            lots = _get_open_trades(ticker)
+            if not lots:
                 continue
 
-            sl = trade_info.get("stop_loss") or 0
-            tp = trade_info.get("take_profit") or 0
-            tp1 = trade_info.get("take_profit_1") or 0
-            max_hold = trade_info.get("max_hold_days") or 20
-            entry_date = trade_info.get("entry_date")
-            trade_qty = trade_info.get("quantity") or (pos.get("qty") or 0)
-            broker_qty = pos.get("qty") or 0
+            # brokerは銘柄単位の合算数量しか返さないため、ロットを処理するたびに減算していく
+            remaining_broker_qty = pos.get("qty") or 0
 
-            # (1) 戦略固有のエグジットチェック
-            suppress_tp = False
-            strategy_name = trade_info.get("strategy_name", "")
-            try:
-                strategy = get_strategy(strategy_name)
-                decision = strategy.check_exit(ticker, df, trade_info)
-                if decision is not None:
-                    if decision.should_exit:
-                        if broker_qty > 0:
+            for lot in lots:
+                if remaining_broker_qty <= 0:
+                    break
+
+                trade_id = lot["id"]
+                lot_qty = min(lot.get("quantity") or 0, remaining_broker_qty)
+                if lot_qty <= 0:
+                    continue
+                # 決済するロットもホールドするロットもbroker数量を占有する。
+                # 決済時だけ減算すると、ホールド中ロットの株数を後続ロットが
+                # 二重に売ってしまうため、ここで先に消費させる。
+                remaining_broker_qty -= lot_qty
+
+                sl = lot.get("stop_loss") or 0
+                tp = lot.get("take_profit") or 0
+                tp1 = lot.get("take_profit_1") or 0
+                max_hold = lot.get("max_hold_days") or 20
+                entry_date = lot.get("entry_date")
+                lot_label = f"{ticker}(entry {entry_date})"
+
+                # (1) 戦略固有のエグジットチェック（entry_price/highest_priceがロットごとに異なるため個別判定）
+                suppress_tp = False
+                strategy_name = lot.get("strategy_name", "")
+                try:
+                    strategy = get_strategy(strategy_name)
+                    decision = strategy.check_exit(ticker, df, lot)
+                    if decision is not None:
+                        if decision.should_exit:
                             forced_signal = Signal(
                                 ticker=ticker, action="SELL", confidence=1.0,
                                 stop_loss=0, take_profit=0, reason=decision.reason,
                                 price=current_price,
                             )
-                            order = place_order(forced_signal, broker_qty)
-                            close_trade_log(ticker, order, current_price)
-                            forced_exit_orders.append(f"FORCED-EXIT {broker_qty}x {ticker}: {decision.reason}")
+                            order = place_order(forced_signal, lot_qty)
+                            close_trade_log_by_id(trade_id, order, current_price, sold_qty=lot_qty)
+                            forced_exit_orders.append(f"FORCED-EXIT {lot_qty}x {lot_label}: {decision.reason}")
                             logger.info(f"Strategy exit: {decision.reason}")
+                            continue
+                        suppress_tp = decision.suppress_tp
+                except KeyError:
+                    pass  # 戦略が見つからない場合はデフォルトロジックを使用
+
+                exit_reason = None
+
+                # (2) ストップロス（常にチェック）
+                if sl > 0 and current_price <= sl:
+                    exit_reason = f"ストップロス発動 (SL=${sl:.2f}, 現在=${current_price:.2f})"
+
+                # (3) 段階利確（TP1）: このロットの半分を決済
+                elif tp1 > 0 and current_price >= tp1:
+                    half_qty = max(lot_qty // 2, 1)
+                    if half_qty < lot_qty:
+                        forced_signal = Signal(
+                            ticker=ticker, action="SELL", confidence=1.0,
+                            stop_loss=0, take_profit=0,
+                            reason=f"段階利確TP1到達 (TP1=${tp1:.2f}, 現在=${current_price:.2f})",
+                            price=current_price,
+                        )
+                        order = place_order(forced_signal, half_qty)
+                        partial_close_trade_log_by_id(trade_id, order, current_price, half_qty)
+                        forced_exit_orders.append(
+                            f"PARTIAL-EXIT {half_qty}x {lot_label}: 段階利確TP1=${tp1:.2f}"
+                        )
+                        logger.info(f"Staged TP1: sold {half_qty} of {lot_qty} shares (lot id={trade_id})")
                         continue
-                    suppress_tp = decision.suppress_tp
-            except KeyError:
-                pass  # 戦略が見つからない場合はデフォルトロジックを使用
+                    else:
+                        # 1株しかない場合は全量決済
+                        exit_reason = f"段階利確TP1到達・全量決済 (TP1=${tp1:.2f}, 現在=${current_price:.2f})"
 
-            exit_reason = None
+                # (4) 通常利確（suppress_tp=Trueならスキップ）
+                elif not suppress_tp and tp > 0 and current_price >= tp:
+                    exit_reason = f"利確ターゲット到達 (TP=${tp:.2f}, 現在=${current_price:.2f})"
 
-            # (2) ストップロス（常にチェック）
-            if sl > 0 and current_price <= sl:
-                exit_reason = f"ストップロス発動 (SL=${sl:.2f}, 現在=${current_price:.2f})"
+                # (5) 最大保有期間
+                elif entry_date and max_hold > 0:
+                    holding_days = (today_jst() - entry_date).days
+                    if holding_days >= max_hold:
+                        exit_reason = f"最大保有期間{max_hold}日超過 ({holding_days}日経過)"
 
-            # (3) 段階利確（TP1）: 半分を決済
-            elif tp1 > 0 and current_price >= tp1:
-                half_qty = max(trade_qty // 2, 1)
-                if broker_qty > 0 and half_qty < broker_qty:
+                if exit_reason:
                     forced_signal = Signal(
                         ticker=ticker, action="SELL", confidence=1.0,
-                        stop_loss=0, take_profit=0,
-                        reason=f"段階利確TP1到達 (TP1=${tp1:.2f}, 現在=${current_price:.2f})",
+                        stop_loss=0, take_profit=0, reason=exit_reason,
                         price=current_price,
                     )
-                    order = place_order(forced_signal, half_qty)
-                    partial_close_trade_log(ticker, order, current_price, half_qty)
-                    forced_exit_orders.append(
-                        f"PARTIAL-EXIT {half_qty}x {ticker}: 段階利確TP1=${tp1:.2f}"
-                    )
-                    logger.info(f"Staged TP1: sold {half_qty} of {broker_qty} shares")
-                elif broker_qty > 0:
-                    # 1株しかない場合は全量決済
-                    exit_reason = f"段階利確TP1到達・全量決済 (TP1=${tp1:.2f}, 現在=${current_price:.2f})"
-
-            # (4) 通常利確（suppress_tp=Trueならスキップ）
-            elif not suppress_tp and tp > 0 and current_price >= tp:
-                exit_reason = f"利確ターゲット到達 (TP=${tp:.2f}, 現在=${current_price:.2f})"
-
-            # (5) 最大保有期間
-            elif entry_date and max_hold > 0:
-                holding_days = (today_jst() - entry_date).days
-                if holding_days >= max_hold:
-                    exit_reason = f"最大保有期間{max_hold}日超過 ({holding_days}日経過)"
-
-            if exit_reason and broker_qty > 0:
-                forced_signal = Signal(
-                    ticker=ticker, action="SELL", confidence=1.0,
-                    stop_loss=0, take_profit=0, reason=exit_reason,
-                    price=current_price,
-                )
-                order = place_order(forced_signal, broker_qty)
-                close_trade_log(ticker, order, current_price)
-                forced_exit_orders.append(f"FORCED-EXIT {broker_qty}x {ticker}: {exit_reason}")
-                logger.info(f"Forced exit: {exit_reason}")
+                    order = place_order(forced_signal, lot_qty)
+                    close_trade_log_by_id(trade_id, order, current_price, sold_qty=lot_qty)
+                    forced_exit_orders.append(f"FORCED-EXIT {lot_qty}x {lot_label}: {exit_reason}")
+                    logger.info(f"Forced exit: {exit_reason}")
         except Exception as e:
             logger.exception(f"{ticker}: 強制エグジット処理でエラー")
             position_errors.append(f"{ticker}: {type(e).__name__}: {e}")
@@ -338,7 +363,16 @@ def run_daily():
                 (p for p in account.positions if signal.ticker in p["ticker"]),
                 None,
             )
-            qty = pos["qty"] if pos else 0
+            # Step 3 のロット単位決済で既に売った分を二重に売らないよう、
+            # broker数量とDB上の残OPEN数量の小さい方に制限する。
+            # （Step 3 の売り注文は当日中は約定照合前で、口座数量に反映されないことがある）
+            broker_qty = pos["qty"] if pos else 0
+            qty = min(broker_qty, _get_open_qty(signal.ticker))
+            if qty < broker_qty:
+                logger.info(
+                    f"{signal.ticker}: SELL数量を{broker_qty}→{qty}に制限"
+                    "（Step 3で決済済みのロット分を除外）"
+                )
             if qty > 0:
                 order = place_order(signal, qty)
                 close_trade_log(signal.ticker, order, signal.take_profit)
@@ -448,6 +482,54 @@ def _get_open_trade_info(ticker: str) -> dict | None:
             "quantity": trade.quantity,
             "strategy_name": trade.strategy_name,
         }
+
+
+def _get_open_trades(ticker: str) -> list[dict]:
+    """TradeLogからオープンな全ロット（entry_date昇順）のSL/TP/エントリー日を取得する。
+
+    同一銘柄に複数OPEN行がある場合、ロットごとに個別のSL/TP/TP1判定を行うために使う。
+    """
+    from sqlalchemy import select
+
+    from src.models.trade import TradeLog
+
+    with get_session() as session:
+        trades = session.execute(
+            select(TradeLog)
+            .where(TradeLog.ticker == ticker)
+            .where(TradeLog.status == "OPEN")
+            .order_by(TradeLog.entry_date)
+        ).scalars().all()
+        return [
+            {
+                "id": trade.id,
+                "stop_loss": trade.stop_loss or 0,
+                "take_profit": trade.take_profit or 0,
+                "take_profit_1": trade.take_profit_1 or 0,
+                "max_hold_days": trade.max_hold_days or 20,
+                "entry_date": trade.entry_date,
+                "entry_price": trade.entry_price,
+                "highest_price": trade.highest_price or trade.entry_price,
+                "quantity": trade.quantity,
+                "strategy_name": trade.strategy_name,
+            }
+            for trade in trades
+        ]
+
+
+def _get_open_qty(ticker: str) -> int:
+    """trade_log上でまだOPENな合計株数を返す（SELL数量の上限として使う）。"""
+    from sqlalchemy import func, select
+
+    from src.models.trade import TradeLog
+
+    with get_session() as session:
+        total = session.execute(
+            select(func.sum(TradeLog.quantity))
+            .where(TradeLog.ticker == ticker)
+            .where(TradeLog.status == "OPEN")
+        ).scalar()
+        return int(total or 0)
 
 
 def _update_highest_price(ticker: str, today_high: float) -> None:
