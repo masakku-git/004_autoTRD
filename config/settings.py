@@ -20,6 +20,15 @@ class Settings(BaseSettings):
     # デフォルトは JP_TOKUTEI（特定口座・源泉徴収あり）。税務処理が自動化される安全側の既定値。
     moomoo_jp_acc_type: str = "JP_TOKUTEI"
 
+    # 株価データ取得元。"yfinance"（既定）or "moomoo"。
+    # 既定を yfinance にしているのは、moomoo 経路は OpenD 未起動時に空の
+    # DataFrame を返すだけで例外にならず、price_cache が更新されないまま
+    # 古い価格でシグナルが出るため。moomoo を使う環境では .env で明示的に
+    # DATA_SOURCE=moomoo を指定すること。
+    # moomoo は履歴K線取得にクォータ制限があるため、切替前/デプロイ直後は
+    # scripts/fetch_test_moomoo.py の get_history_kl_quota() で残量を確認すること。
+    data_source: str = "yfinance"
+
     # トレーディング基本設定
     dry_run: bool = True                    # True: 注文を実際には送信しない
     max_positions: int = 3                  # 同時保有ポジション数の上限
