@@ -21,10 +21,10 @@ class Settings(BaseSettings):
     moomoo_jp_acc_type: str = "JP_TOKUTEI"
 
     # 株価データ取得元。"yfinance"（既定）or "moomoo"。
-    # 既定を yfinance にしているのは、moomoo 経路は OpenD 未起動時に空の
-    # DataFrame を返すだけで例外にならず、price_cache が更新されないまま
-    # 古い価格でシグナルが出るため。moomoo を使う環境では .env で明示的に
-    # DATA_SOURCE=moomoo を指定すること。
+    # moomoo を指定しても OpenD に接続できない場合は yfinance に自動フォールバック
+    # する（Slack に警告を送ったうえで日次実行は継続）。既定を yfinance にしている
+    # のは、OpenD を持たない環境で無駄な接続待ちを発生させないため。moomoo を使う
+    # 環境では .env で明示的に DATA_SOURCE=moomoo を指定すること。
     # moomoo は履歴K線取得にクォータ制限があるため、切替前/デプロイ直後は
     # scripts/fetch_test_moomoo.py の get_history_kl_quota() で残量を確認すること。
     data_source: str = "yfinance"

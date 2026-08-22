@@ -14,6 +14,7 @@ from src.data.fetcher import (
     _ticker_to_moomoo_code,
     fetch_from_moomoo,
     moomoo_quote_ctx,
+    update_price_cache,
     update_price_cache_batch,
 )
 
@@ -245,7 +246,8 @@ def test_update_price_cache_batch_opens_one_ctx_for_all_tickers(monkeypatch):
     monkeypatch.setattr("src.data.fetcher.FETCH_DELAY_SEC", 0)
     monkeypatch.setattr("src.data.fetcher.log_history_kl_quota", lambda ctx=None: None)
     monkeypatch.setattr(
-        "src.data.fetcher.update_price_cache", lambda ticker, ctx=None: 0
+        "src.data.fetcher.update_price_cache",
+        lambda ticker, ctx=None, source=None: 0,
     )
 
     with patch("moomoo.OpenQuoteContext", return_value=_ready_ctx()) as mock_cls:
@@ -255,9 +257,61 @@ def test_update_price_cache_batch_opens_one_ctx_for_all_tickers(monkeypatch):
     assert set(results) == {"AAPL", "MSFT", "NVDA"}
 
 
-def test_update_price_cache_batch_raises_when_opend_unreachable(monkeypatch):
-    """接続不能なら空振りせずPriceFetchErrorで一括更新を打ち切る"""
+def test_update_price_cache_batch_falls_back_to_yfinance(monkeypatch):
+    """OpenDに接続できないときは中断せずyfinanceで全銘柄を取得し直す"""
     monkeypatch.setattr("src.data.fetcher.settings.data_source", "moomoo")
+    monkeypatch.setattr("src.data.fetcher.MOOMOO_CONNECT_TIMEOUT_SEC", 0.05)
+    monkeypatch.setattr("src.data.fetcher.MOOMOO_CONNECT_POLL_SEC", 0.01)
+    monkeypatch.setattr("src.data.fetcher.FETCH_DELAY_SEC", 0)
+
+    notified = []
+    monkeypatch.setattr(
+        "src.data.fetcher._notify_moomoo_fallback", lambda e: notified.append(e)
+    )
+
+    used_sources = {}
+
+    def fake_update(ticker, ctx=None, source=None):
+        used_sources[ticker] = source
+        return 0
+
+    monkeypatch.setattr("src.data.fetcher.update_price_cache", fake_update)
+
+    never_ready = MagicMock()
+    never_ready.status = "CONNECTING"
+
+    with patch("moomoo.OpenQuoteContext", return_value=never_ready):
+        results = update_price_cache_batch(["AAPL", "MSFT"])
+
+    assert set(results) == {"AAPL", "MSFT"}
+    assert used_sources == {"AAPL": "yfinance", "MSFT": "yfinance"}
+    assert len(notified) == 1
+    # フォールバック時も接続は閉じる
+    never_ready.close.assert_called_once()
+
+
+def test_update_price_cache_falls_back_per_ticker(monkeypatch):
+    """単発取得でもmoomoo接続不可ならyfinanceにフォールバックする"""
+    monkeypatch.setattr("src.data.fetcher.settings.data_source", "moomoo")
+    monkeypatch.setattr("src.data.fetcher.get_last_cached_date", lambda t: None)
+    monkeypatch.setattr("src.data.fetcher.save_to_cache", lambda t, df: len(df))
+
+    def boom(ticker, start, end=None, ctx=None):
+        raise PriceFetchError("OpenD unreachable")
+
+    monkeypatch.setattr("src.data.fetcher.fetch_from_moomoo", boom)
+    monkeypatch.setattr(
+        "src.data.fetcher.fetch_from_yfinance",
+        lambda ticker, start, end=None: _make_df(),
+    )
+
+    assert update_price_cache("AAPL") == len(_make_df())
+
+
+def test_fetch_from_moomoo_raises_on_connect_timeout(monkeypatch):
+    """接続不能は空DataFrameに丸めず、上位がフォールバック判断できるよう送出する"""
+    from datetime import date
+
     monkeypatch.setattr("src.data.fetcher.MOOMOO_CONNECT_TIMEOUT_SEC", 0.05)
     monkeypatch.setattr("src.data.fetcher.MOOMOO_CONNECT_POLL_SEC", 0.01)
 
@@ -266,4 +320,4 @@ def test_update_price_cache_batch_raises_when_opend_unreachable(monkeypatch):
 
     with patch("moomoo.OpenQuoteContext", return_value=never_ready):
         with pytest.raises(PriceFetchError):
-            update_price_cache_batch(["AAPL", "MSFT"])
+            fetch_from_moomoo("AAPL", date(2026, 7, 1), date(2026, 7, 3))

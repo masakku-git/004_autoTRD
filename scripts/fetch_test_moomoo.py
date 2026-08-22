@@ -23,6 +23,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from src.data.fetcher import (
+    PriceFetchError,
     fetch_from_moomoo,
     get_ohlcv,
     log_history_kl_quota,
@@ -82,10 +83,15 @@ def main() -> None:
     print("moomoo価格データ 動作確認スクリプト（読み取り専用、price_cacheへの書き込みなし）")
 
     # 本体と同じく OpenD 接続は1本だけ張って全銘柄で使い回す
-    with moomoo_quote_ctx() as ctx:
-        log_history_kl_quota(ctx)
-        for ticker in tickers:
-            _compare_ticker(ticker, args.days, ctx)
+    try:
+        with moomoo_quote_ctx() as ctx:
+            log_history_kl_quota(ctx)
+            for ticker in tickers:
+                _compare_ticker(ticker, args.days, ctx)
+    except PriceFetchError as e:
+        print(f"\n[エラー] moomoo OpenD に接続できません: {e}")
+        print("OpenD が起動しているか、.env の moomoo_host / moomoo_port を確認してください。")
+        sys.exit(1)
 
     print("\n完了")
 

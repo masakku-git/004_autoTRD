@@ -29,12 +29,11 @@ MOOMOO_CONNECT_POLL_SEC = 0.2
 
 
 class PriceFetchError(RuntimeError):
-    """価格データ取得基盤に到達できない（OpenD未起動・未インストール等）。
+    """moomoo OpenD に到達できない（未起動・未インストール等）。
 
-    個別銘柄の取得失敗ではなく「そもそも一括更新が成立しない」状態を表す。
-    update_price_cache_batch から送出され、run_screening 経由で main.run_daily の
-    スクリーニング失敗ハンドラに拾われる（Slack通知 + 新規BUYスキップ、
-    損切り・売却判定は継続）。"""
+    個別銘柄の取得失敗ではなく「そもそも moomoo 経路が成立しない」状態を表す。
+    上位（update_price_cache / update_price_cache_batch）がこれを捕捉して
+    yfinance にフォールバックするための内部シグナルであり、日次実行は止めない。"""
 
 
 
@@ -187,8 +186,11 @@ def fetch_from_moomoo(
     price_cache に焼き付き、SL/TP判定やATR/RSを壊す。よって前日でクランプする。
 
     ctx を渡した場合はその接続を使い回し、close は呼び出し側に任せる。None なら
-    自前で1本開いて閉じる（単発利用向け）。単発利用では接続失敗も空DataFrameに
-    丸めて返す。一括更新で接続失敗を検知したい場合は update_price_cache_batch を使う。
+    自前で1本開いて閉じる（単発利用向け）。
+
+    OpenD に到達できない場合は PriceFetchError を送出する（呼び出し側が yfinance へ
+    フォールバックできるようにするため、空DataFrameには丸めない）。個別銘柄の
+    取得失敗・データ無しは従来どおり空DataFrameを返す。
     """
     end = min(end or date.today(), date.today() - timedelta(days=1))
     if start > end:
@@ -200,12 +202,10 @@ def fetch_from_moomoo(
             return _request_kline(ctx, ticker, start, end)
         with moomoo_quote_ctx() as own_ctx:
             return _request_kline(own_ctx, ticker, start, end)
-    except ImportError:
-        logger.warning("moomoo-api not installed, cannot fetch from moomoo")
-        return pd.DataFrame()
-    except PriceFetchError as e:
-        logger.error(f"{ticker}: {e}")
-        return pd.DataFrame()
+    except ImportError as e:
+        raise PriceFetchError("moomoo-api が未インストールです") from e
+    except PriceFetchError:
+        raise
     except Exception as e:
         logger.error(f"Failed to fetch {ticker} from moomoo: {e}")
         return pd.DataFrame()
@@ -286,11 +286,14 @@ def save_to_cache(ticker: str, df: pd.DataFrame) -> int:
     return rows_inserted
 
 
-def update_price_cache(ticker: str, ctx=None) -> int:
+def update_price_cache(ticker: str, ctx=None, source: str | None = None) -> int:
     """Fetch and cache price data. Delta fetch if data already exists.
 
     ctx は moomoo 経路で使い回す OpenQuoteContext（None なら都度開く）。
+    source を省略すると settings.data_source に従う。moomoo 経路で OpenD に
+    到達できない場合は yfinance にフォールバックする。
     """
+    source = source or settings.data_source
     last_date = get_last_cached_date(ticker)
     if last_date:
         start = last_date + timedelta(days=1)
@@ -301,18 +304,24 @@ def update_price_cache(ticker: str, ctx=None) -> int:
         logger.debug(f"{ticker} cache is up to date")
         return 0
 
-    if settings.data_source == "moomoo":
-        df = fetch_from_moomoo(ticker, start, ctx=ctx)
+    if source == "moomoo":
+        try:
+            df = fetch_from_moomoo(ticker, start, ctx=ctx)
+        except PriceFetchError as e:
+            logger.warning(f"{ticker}: moomooに接続できないためyfinanceで取得します（{e}）")
+            df = fetch_from_yfinance(ticker, start)
     else:
         df = fetch_from_yfinance(ticker, start)
     return save_to_cache(ticker, df)
 
 
-def _update_each(tickers: list[str], ctx=None) -> dict[str, int]:
+def _update_each(
+    tickers: list[str], ctx=None, source: str | None = None
+) -> dict[str, int]:
     """銘柄ごとに順次キャッシュ更新する（レート制限のため間隔を空ける）。"""
     results = {}
     for i, ticker in enumerate(tickers):
-        results[ticker] = update_price_cache(ticker, ctx=ctx)
+        results[ticker] = update_price_cache(ticker, ctx=ctx, source=source)
         if i < len(tickers) - 1:
             time.sleep(FETCH_DELAY_SEC)
     return results
@@ -321,9 +330,11 @@ def _update_each(tickers: list[str], ctx=None) -> dict[str, int]:
 def update_price_cache_batch(tickers: list[str]) -> dict[str, int]:
     """Update cache for multiple tickers with rate limiting.
 
-    moomoo 経路では OpenD 接続を1本だけ張って全銘柄で使い回す。接続自体が
-    確立できない場合は PriceFetchError を送出して一括更新を打ち切る
-    （古い price_cache のまま黙ってスクリーニングが進むのを防ぐ）。
+    moomoo 経路では OpenD 接続を1本だけ張って全銘柄で使い回す。接続が確立できない
+    場合はバッチ全体を yfinance に切り替えて続行し、Slackに警告を送る
+    （日次実行は止めないが、データ源が変わったことは必ず気付けるようにする）。
+    銘柄ごとに接続を試し直すと OpenD 未起動時に銘柄数×タイムアウト待たされるため、
+    フォールバックの判断は接続確立の1回だけで行う。
     """
     if settings.data_source != "moomoo":
         return _update_each(tickers)
@@ -331,11 +342,28 @@ def update_price_cache_batch(tickers: list[str]) -> dict[str, int]:
     try:
         with moomoo_quote_ctx() as ctx:
             log_history_kl_quota(ctx)
+            # ctx を渡すので個別銘柄で再接続は起きず、ここから PriceFetchError は出ない
             return _update_each(tickers, ctx=ctx)
-    except ImportError as e:
-        raise PriceFetchError(
-            "moomoo-api が未インストールのため価格キャッシュを更新できません"
-        ) from e
+    except PriceFetchError as e:
+        logger.warning(f"moomooに接続できないためyfinanceにフォールバックします（{e}）")
+        _notify_moomoo_fallback(e)
+        return _update_each(tickers, source="yfinance")
+
+
+def _notify_moomoo_fallback(error: Exception) -> None:
+    """moomoo→yfinance フォールバック発生をSlackに通知する（通知失敗は握り潰す）。"""
+    try:
+        from src.notify.notifier import send_notification
+
+        send_notification(
+            "価格データ取得元をyfinanceにフォールバック",
+            "moomoo OpenD に接続できなかったため、本日の価格キャッシュ更新は "
+            "yfinance から行いました。売買判定は継続していますが、OpenD の稼働状況を "
+            f"確認してください。\n\n{type(error).__name__}: {error}",
+            level="warning",
+        )
+    except Exception as e:
+        logger.warning(f"フォールバック通知の送信に失敗: {e}")
 
 
 def get_ohlcv(
