@@ -98,15 +98,25 @@ def moomoo_quote_ctx():
     コンストラクタが `while True: ... sleep(6)` で永久リトライし、例外も投げずに
     ハングする（呼び出し側の except では捕捉できない）。非同期接続にしたうえで
     READY をタイムアウト付きで待ち、駄目なら PriceFetchError を送出する。
-    """
-    from moomoo import ContextStatus, OpenQuoteContext, SecurityFirm
 
-    ctx = OpenQuoteContext(
-        host=settings.moomoo_host,
-        port=settings.moomoo_port,
-        security_firm=SecurityFirm.FUTUJP,
-        is_async_connect=True,
-    )
+    接続確立に至るまでの失敗は理由を問わず PriceFetchError に包む。SDKの
+    バージョン差による TypeError（例: security_firm 未対応の古い moomoo-api）など
+    PriceFetchError 以外が漏れると、呼び出し側の yfinance フォールバックを素通りして
+    スクリーニングごと落ちるため（2026-08-24 の新規BUY全スキップの原因）。
+    """
+    try:
+        from moomoo import ContextStatus, OpenQuoteContext, SecurityFirm
+
+        ctx = OpenQuoteContext(
+            host=settings.moomoo_host,
+            port=settings.moomoo_port,
+            security_firm=SecurityFirm.FUTUJP,
+            is_async_connect=True,
+        )
+    except Exception as e:
+        raise PriceFetchError(
+            f"moomoo OpenQuoteContext を生成できませんでした: {type(e).__name__}: {e}"
+        ) from e
     try:
         deadline = time.monotonic() + MOOMOO_CONNECT_TIMEOUT_SEC
         while ctx.status != ContextStatus.READY:
@@ -117,9 +127,28 @@ def moomoo_quote_ctx():
                     f"{MOOMOO_CONNECT_TIMEOUT_SEC}秒, status={ctx.status})"
                 )
             time.sleep(MOOMOO_CONNECT_POLL_SEC)
+    except PriceFetchError:
+        _close_quietly(ctx)
+        raise
+    except Exception as e:
+        _close_quietly(ctx)
+        raise PriceFetchError(
+            f"moomoo OpenD への接続待機に失敗しました: {type(e).__name__}: {e}"
+        ) from e
+
+    # ここから先で出る例外は呼び出し側のもの。包み直さずそのまま通す。
+    try:
         yield ctx
     finally:
+        _close_quietly(ctx)
+
+
+def _close_quietly(ctx) -> None:
+    """close の失敗でリソース解放以外の流れを壊さないようにする。"""
+    try:
         ctx.close()
+    except Exception as e:
+        logger.warning(f"moomoo OpenQuoteContext の close に失敗: {e}")
 
 
 def _request_kline(ctx, ticker: str, start: date, end: date) -> pd.DataFrame:
@@ -310,6 +339,15 @@ def update_price_cache(ticker: str, ctx=None, source: str | None = None) -> int:
         except PriceFetchError as e:
             logger.warning(f"{ticker}: moomooに接続できないためyfinanceで取得します（{e}）")
             df = fetch_from_yfinance(ticker, start)
+        else:
+            # fetch_from_moomoo は個別銘柄の取得失敗も空DataFrameに丸めるため、
+            # 取得対象期間があるのに0件なら失敗の可能性がある。黙って未更新のまま
+            # 進むと古い終値でSL/TP判定をしてしまうので、yfinanceで取り直す。
+            if df.empty and start <= date.today() - timedelta(days=1):
+                logger.warning(
+                    f"{ticker}: moomooから0件だったためyfinanceで取得し直します"
+                )
+                df = fetch_from_yfinance(ticker, start)
     else:
         df = fetch_from_yfinance(ticker, start)
     return save_to_cache(ticker, df)

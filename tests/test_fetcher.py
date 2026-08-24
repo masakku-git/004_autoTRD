@@ -321,3 +321,92 @@ def test_fetch_from_moomoo_raises_on_connect_timeout(monkeypatch):
     with patch("moomoo.OpenQuoteContext", return_value=never_ready):
         with pytest.raises(PriceFetchError):
             fetch_from_moomoo("AAPL", date(2026, 7, 1), date(2026, 7, 3))
+
+
+def test_moomoo_quote_ctx_wraps_sdk_typeerror():
+    """SDKの引数不一致（古いmoomoo-api）もPriceFetchErrorに包む
+
+    2026-08-24 はここで TypeError が素通りし、yfinanceフォールバックに乗らないまま
+    スクリーニングごと落ちて新規BUYが全スキップになった。
+    """
+
+    def old_sdk(**kwargs):
+        raise TypeError(
+            "OpenQuoteContext.__init__() got an unexpected keyword argument "
+            "'security_firm'"
+        )
+
+    with patch("moomoo.OpenQuoteContext", side_effect=old_sdk):
+        with pytest.raises(PriceFetchError):
+            with moomoo_quote_ctx():
+                pass
+
+
+def test_update_price_cache_batch_falls_back_on_sdk_typeerror(monkeypatch):
+    """SDK不整合でもバッチは中断せずyfinanceで継続する"""
+    monkeypatch.setattr("src.data.fetcher.settings.data_source", "moomoo")
+    monkeypatch.setattr("src.data.fetcher.FETCH_DELAY_SEC", 0)
+    monkeypatch.setattr("src.data.fetcher._notify_moomoo_fallback", lambda e: None)
+
+    used_sources = {}
+
+    def fake_update(ticker, ctx=None, source=None):
+        used_sources[ticker] = source
+        return 0
+
+    monkeypatch.setattr("src.data.fetcher.update_price_cache", fake_update)
+
+    with patch("moomoo.OpenQuoteContext", side_effect=TypeError("bad kwarg")):
+        results = update_price_cache_batch(["AAPL", "MSFT"])
+
+    assert set(results) == {"AAPL", "MSFT"}
+    assert used_sources == {"AAPL": "yfinance", "MSFT": "yfinance"}
+
+
+def test_update_price_cache_retries_with_yfinance_when_moomoo_empty(monkeypatch):
+    """moomooが0件を返したら黙って未更新にせずyfinanceで取り直す
+
+    fetch_from_moomoo は個別銘柄の取得失敗も空DataFrameに丸めるため、そのままだと
+    価格が古いままSL/TP判定に使われてしまう。
+    """
+    from datetime import date, timedelta
+
+    monkeypatch.setattr("src.data.fetcher.settings.data_source", "moomoo")
+    monkeypatch.setattr(
+        "src.data.fetcher.get_last_cached_date",
+        lambda t: date.today() - timedelta(days=10),
+    )
+    monkeypatch.setattr("src.data.fetcher.save_to_cache", lambda t, df: len(df))
+    monkeypatch.setattr(
+        "src.data.fetcher.fetch_from_moomoo",
+        lambda ticker, start, end=None, ctx=None: pd.DataFrame(),
+    )
+    monkeypatch.setattr(
+        "src.data.fetcher.fetch_from_yfinance",
+        lambda ticker, start, end=None: _make_df(),
+    )
+
+    assert update_price_cache("AAPL") == len(_make_df())
+
+
+def test_update_price_cache_skips_yfinance_retry_without_fetch_window(monkeypatch):
+    """取得対象期間が無い（前日分まで取得済み）ときは再取得しない"""
+    from datetime import date, timedelta
+
+    monkeypatch.setattr("src.data.fetcher.settings.data_source", "moomoo")
+    monkeypatch.setattr(
+        "src.data.fetcher.get_last_cached_date",
+        lambda t: date.today() - timedelta(days=1),
+    )
+    monkeypatch.setattr("src.data.fetcher.save_to_cache", lambda t, df: len(df))
+    monkeypatch.setattr(
+        "src.data.fetcher.fetch_from_moomoo",
+        lambda ticker, start, end=None, ctx=None: pd.DataFrame(),
+    )
+
+    def unexpected(ticker, start, end=None):
+        raise AssertionError("yfinanceを呼んではいけない")
+
+    monkeypatch.setattr("src.data.fetcher.fetch_from_yfinance", unexpected)
+
+    assert update_price_cache("AAPL") == 0
