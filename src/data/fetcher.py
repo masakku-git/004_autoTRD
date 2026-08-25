@@ -3,7 +3,8 @@ from __future__ import annotations
 
 import time
 from contextlib import contextmanager
-from datetime import date, timedelta
+from datetime import date, datetime, time as dtime, timedelta
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 import yfinance as yf
@@ -26,6 +27,9 @@ MAX_KLINE_PAGES = 20
 MOOMOO_CONNECT_TIMEOUT_SEC = 15
 # 接続状態のポーリング間隔
 MOOMOO_CONNECT_POLL_SEC = 0.2
+# 米国市場のタイムゾーンと大引け時刻（サマータイムはZoneInfoが吸収する）
+US_MARKET_TZ = ZoneInfo("America/New_York")
+US_MARKET_CLOSE = dtime(16, 0)
 
 
 class PriceFetchError(RuntimeError):
@@ -35,6 +39,29 @@ class PriceFetchError(RuntimeError):
     上位（update_price_cache / update_price_cache_batch）がこれを捕捉して
     yfinance にフォールバックするための内部シグナルであり、日次実行は止めない。"""
 
+
+
+def last_completed_us_session(now: datetime | None = None) -> date:
+    """直近に大引けを迎えた米国市場の営業日を返す。
+
+    price_cache に「まだ形成途中の日足」を入れないための上限日。実行時刻のローカル
+    日付（JST）から前日を引く方式だと、日本時間の 00:00〜05:00 は米国市場が前日の
+    日付でまだ取引中のため、場中のスナップショットを確定足として取り込んでしまう。
+    save_to_cache は原則として既存日付を上書きしないため、一度混入すると自動修復
+    されず、ATR/相対強度/出来高平均/RSI が数ヶ月にわたり歪む
+    （2026-08-24 に手動再実行で全50銘柄が汚染された事例）。
+
+    判定は米東部時間で行う。大引け(16:00 ET)前ならその日はまだ確定していないので
+    前日に下げ、土日は直前の平日まで巻き戻す。祝日は考慮しない（休場日を上限に
+    しても「その日までを取得」の上限が1日ずれるだけで、未確定足は混入しない）。
+    """
+    now_et = (now or datetime.now(US_MARKET_TZ)).astimezone(US_MARKET_TZ)
+    session = now_et.date()
+    if now_et.time() < US_MARKET_CLOSE:
+        session -= timedelta(days=1)
+    while session.weekday() >= 5:  # 5=土, 6=日
+        session -= timedelta(days=1)
+    return session
 
 
 def get_last_cached_date(ticker: str) -> date | None:
@@ -49,8 +76,18 @@ def get_last_cached_date(ticker: str) -> date | None:
 def fetch_from_yfinance(
     ticker: str, start: date, end: date | None = None
 ) -> pd.DataFrame:
-    """Fetch OHLCV data from yfinance."""
-    end = end or date.today()
+    """Fetch OHLCV data from yfinance.
+
+    end は yfinance の仕様どおり排他（その日を含まない）。確定済みの最終セッション
+    までしか取り込まないよう、その翌日でクランプする。米国場中に呼ぶと当日の
+    未確定足が返るため、moomoo 経路と同じ焼き付きが起きる（^GSPC/^VIX のように
+    moomoo が扱えずフォールバックする銘柄で実際に発生した）。
+    """
+    max_end = last_completed_us_session() + timedelta(days=1)
+    end = min(end or max_end, max_end)
+    if start >= end:
+        logger.debug(f"{ticker}: 取得対象期間なし（start={start}, end={end}）")
+        return pd.DataFrame()
     logger.info(f"Fetching {ticker} from yfinance: {start} to {end}")
     try:
         df = yf.download(
@@ -209,10 +246,9 @@ def fetch_from_moomoo(
 ) -> pd.DataFrame:
     """Fetch OHLCV data from moomoo OpenD (request_history_kline).
 
-    end は yfinance と揃えて「当日を含まない」意味で扱う。yfinance の end は排他
-    だが moomoo の end は包含であり、場中に呼ぶと形成途中の当日日足が返る。
-    save_to_cache は既存日付の行を更新しないため、未確定OHLCVがそのまま
-    price_cache に焼き付き、SL/TP判定やATR/RSを壊す。よって前日でクランプする。
+    moomoo の end は包含であり、場中に呼ぶと形成途中の当日日足が返る。未確定
+    OHLCV が price_cache に焼き付くと SL/TP判定やATR/RSを壊すため、
+    last_completed_us_session()（直近に大引けを迎えた米国営業日）でクランプする。
 
     ctx を渡した場合はその接続を使い回し、close は呼び出し側に任せる。None なら
     自前で1本開いて閉じる（単発利用向け）。
@@ -221,7 +257,8 @@ def fetch_from_moomoo(
     フォールバックできるようにするため、空DataFrameには丸めない）。個別銘柄の
     取得失敗・データ無しは従来どおり空DataFrameを返す。
     """
-    end = min(end or date.today(), date.today() - timedelta(days=1))
+    session_end = last_completed_us_session()
+    end = min(end or session_end, session_end)
     if start > end:
         logger.debug(f"{ticker}: 取得対象期間なし（start={start} > end={end}）")
         return pd.DataFrame()
@@ -280,39 +317,59 @@ def _drop_nan_rows(ticker: str, df: pd.DataFrame) -> pd.DataFrame:
 
 
 def save_to_cache(ticker: str, df: pd.DataFrame) -> int:
-    """Save OHLCV DataFrame to DB cache. Returns number of rows inserted."""
+    """Save OHLCV DataFrame to DB cache. Returns number of rows written.
+
+    確定済みの過去日は上書きしない（無駄な更新を避けるため）が、キャッシュ内で
+    最も新しい日付の行だけは新しい値で上書きする。取得元が未確定足を返した場合に
+    自力で修復できないと、誤ったOHLCVが恒久的に残るため（2026-08-24 の事例）。
+    最新日以外はこれまでどおりスキップする。
+    """
     if df.empty:
         return 0
     df = _drop_nan_rows(ticker, df)
     if df.empty:
         return 0
+    # 書き込み前の最新日付。この日付の行だけが上書き対象になる。
+    refreshable_date = get_last_cached_date(ticker)
     rows_inserted = 0
+    rows_updated = 0
     with get_session() as session:
         for _, row in df.iterrows():
             row_date = pd.Timestamp(row["Date"]).date()
-            # Skip if already cached
+            values = {
+                "open": float(row["Open"]),
+                "high": float(row["High"]),
+                "low": float(row["Low"]),
+                "close": float(row["Close"]),
+                "adj_close": float(row.get("Adj Close", row["Close"])),
+                "volume": int(row["Volume"]),
+            }
             existing = session.execute(
-                select(PriceCache.id).where(
+                select(PriceCache).where(
                     PriceCache.ticker == ticker, PriceCache.date == row_date
                 )
-            ).scalar()
-            if existing:
+            ).scalar_one_or_none()
+            if existing is not None:
+                # 過去の確定足はそのまま。最新日のみ、値が変わっていれば更新する。
+                if row_date != refreshable_date:
+                    continue
+                if all(getattr(existing, k) == v for k, v in values.items()):
+                    continue
+                for key, value in values.items():
+                    setattr(existing, key, value)
+                rows_updated += 1
                 continue
-            record = PriceCache(
-                ticker=ticker,
-                date=row_date,
-                open=float(row["Open"]),
-                high=float(row["High"]),
-                low=float(row["Low"]),
-                close=float(row["Close"]),
-                adj_close=float(row.get("Adj Close", row["Close"])),
-                volume=int(row["Volume"]),
-            )
-            session.add(record)
+            session.add(PriceCache(ticker=ticker, date=row_date, **values))
             rows_inserted += 1
         session.commit()
-    logger.info(f"Cached {rows_inserted} new rows for {ticker}")
-    return rows_inserted
+    if rows_updated:
+        logger.info(
+            f"Cached {rows_inserted} new rows for {ticker} "
+            f"（最新日 {refreshable_date} の{rows_updated}行を確定値で更新）"
+        )
+    else:
+        logger.info(f"Cached {rows_inserted} new rows for {ticker}")
+    return rows_inserted + rows_updated
 
 
 def update_price_cache(ticker: str, ctx=None, source: str | None = None) -> int:
@@ -321,15 +378,23 @@ def update_price_cache(ticker: str, ctx=None, source: str | None = None) -> int:
     ctx は moomoo 経路で使い回す OpenQuoteContext（None なら都度開く）。
     source を省略すると settings.data_source に従う。moomoo 経路で OpenD に
     到達できない場合は yfinance にフォールバックする。
+
+    差分取得の起点はキャッシュ最新日の「翌日」ではなく「その日」にする。最新日の
+    足は未確定の状態で保存された可能性があり、翌日以降に取り直さないと誤った
+    OHLCV が恒久的に残るため（save_to_cache が最新日だけ上書きする前提）。
+    取得本数が1本増えるだけで、リクエスト数は変わらない。
     """
     source = source or settings.data_source
     last_date = get_last_cached_date(ticker)
     if last_date:
-        start = last_date + timedelta(days=1)
+        start = last_date
     else:
         start = date.today() - timedelta(days=365 * DEFAULT_HISTORY_YEARS)
 
-    if start >= date.today():
+    # 「最新の確定足まで入っているか」で判定する。ローカル日付(JST)基準だと、
+    # 米国が前日の日付でまだ場中の時間帯に未確定足を取りに行ってしまう。
+    session_date = last_completed_us_session()
+    if start > session_date:
         logger.debug(f"{ticker} cache is up to date")
         return 0
 
@@ -343,7 +408,7 @@ def update_price_cache(ticker: str, ctx=None, source: str | None = None) -> int:
             # fetch_from_moomoo は個別銘柄の取得失敗も空DataFrameに丸めるため、
             # 取得対象期間があるのに0件なら失敗の可能性がある。黙って未更新のまま
             # 進むと古い終値でSL/TP判定をしてしまうので、yfinanceで取り直す。
-            if df.empty and start <= date.today() - timedelta(days=1):
+            if df.empty and start <= session_date:
                 logger.warning(
                     f"{ticker}: moomooから0件だったためyfinanceで取得し直します"
                 )
