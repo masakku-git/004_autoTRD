@@ -7,6 +7,32 @@
 
 ---
 
+## 0. SSH鍵を VPS に登録する
+
+`scripts/query_db.sh` はパスワード入力待ちでハングしないよう、
+**公開鍵認証のみ**（`BatchMode=yes`）で接続します。
+毎回パスワードを手で入力してログインしている場合は、先にこれが必要です。
+
+ローカルのターミナルで一度だけ実行します（VPSのログインパスワードを聞かれます）。
+
+```
+ssh-copy-id -i ~/.ssh/id_ed25519.pub trader@157.180.91.249
+```
+
+> `~/.ssh/id_ed25519` が無い場合は、先に `ssh-keygen -t ed25519` で作成してください
+> （パスフレーズは空のままEnterで構いません。空でない場合は
+> `ssh-add --apple-use-keychain ~/.ssh/id_ed25519` でキーチェーンに登録します）。
+
+登録できたか確認します。パスワードを聞かれずに `ok` と表示されれば成功です。
+
+```
+ssh -o BatchMode=yes trader@157.180.91.249 'echo ok'
+```
+
+これで `ssh` / `rsync` / `scp` のパスワード入力も不要になります。
+
+---
+
 ## 1. VPS にログインする
 
 ローカルのターミナルで、1行ずつ実行してください。
@@ -26,7 +52,7 @@ openssl rand -base64 24
 ```
 7360Fe4B29m8h98cfmAV0LzuWr12CDfP
 
-次に psql に入ります。
+次に、上で表示されたパスワードを `<ここにパスワード>` の部分に貼り付けて実行します。
 
 ```
 sudo -u postgres psql -d autotrd
@@ -34,16 +60,10 @@ sudo -u postgres psql -d autotrd
 
 `autotrd=#` というプロンプトが出たら、以下を1行ずつ貼り付けます。
 
-**1行目だけ注意点があります。** `PASSWORD` の後ろは、手順の先頭で生成した
-パスワードを **シングルクォート `'` で囲んで** 書きます。
-`<` `>` は「ここを置き換えてください」という目印なので、**残さず消してください**。
-
-- 悪い例: `... PASSWORD 7360Fe4B29m8h98cfmAV0LzuWr12CDfP;`（クォート無し → エラー）
-- 悪い例: `... PASSWORD <7360Fe4B29m8h98cfmAV0LzuWr12CDfP>;`（`<>` が残っている → エラー）
-- 良い例: `... PASSWORD '7360Fe4B29m8h98cfmAV0LzuWr12CDfP';`
-
 ```
-CREATE ROLE autotrd_ro WITH LOGIN PASSWORD 'ここにパスワード';
+CREATE ROLE autotrd_ro WITH LOGIN PASSWORD '<ここにパスワード>';
+
+CREATE ROLE autotrd_ro WITH LOGIN PASSWORD '7360Fe4B29m8h98cfmAV0LzuWr12CDfP';
 ```
 ```
 GRANT CONNECT ON DATABASE autotrd TO autotrd_ro;
@@ -74,12 +94,12 @@ ALTER ROLE autotrd_ro SET default_transaction_read_only = on;
 
 ## 3. パスワードを `.pgpass` に保存する（毎回の入力を不要にする）
 
-パスワードは手順2で使ったものと同じです。ここでも `<` `>` は書きません。
-なお `.pgpass` はSQLではないので、パスワード自体をクォートで囲む必要はありません
-（行全体を囲んでいる `'` はシェル用のものなので、そのまま残してください）。
+`<ここにパスワード>` は手順2で決めたものと同じです。
 
 ```
-echo 'localhost:5432:autotrd:autotrd_ro:ここにパスワード' >> ~/.pgpass
+echo 'localhost:5432:autotrd:autotrd_ro:<ここにパスワード>' >> ~/.pgpass
+
+echo 'localhost:5432:autotrd:autotrd_ro:7360Fe4B29m8h98cfmAV0LzuWr12CDfP' >> ~/.pgpass
 ```
 ```
 chmod 600 ~/.pgpass
@@ -121,6 +141,9 @@ bash scripts/query_db.sh --tables
 ```
 
 テーブル一覧が表示されれば完了です。
+
+`Permission denied (publickey,password)` と出る場合は、手順0のSSH鍵登録が
+済んでいません。手順0に戻ってください。
 
 ---
 

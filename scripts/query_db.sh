@@ -80,6 +80,30 @@ if [[ -z "${SQL}" ]]; then
 fi
 
 # SQL は stdin 経由で psql に渡す（引用符のエスケープ事故を避けるため）
-printf '%s\n' "${SQL}" | ssh -o BatchMode=yes "${VPS_HOST}" \
+# BatchMode=yes: パスワード入力待ちでハングさせない。公開鍵認証が前提。
+set +e
+printf '%s\n' "${SQL}" | ssh -o BatchMode=yes -o ConnectTimeout=15 "${VPS_HOST}" \
   "PGOPTIONS='-c default_transaction_read_only=on -c statement_timeout=${STATEMENT_TIMEOUT_MS}' \
    psql -h localhost -U ${DB_USER} -d ${DB_NAME} -v ON_ERROR_STOP=1 $(printf '%q ' "${FMT_OPTS[@]}") -f -"
+rc=${PIPESTATUS[1]}
+set -e
+
+if [[ ${rc} -eq 255 ]]; then
+  cat >&2 <<MSG
+
+------------------------------------------------------------
+SSH 接続に失敗しました（DB の問題ではありません）。
+
+このスクリプトはパスワード入力待ちを避けるため公開鍵認証のみを使います。
+"Permission denied (publickey,password)" と出ている場合は、VPS に公開鍵が
+未登録です。ローカルのターミナルで一度だけ次を実行してください
+（VPS のログインパスワードを聞かれます）:
+
+  ssh-copy-id -i ~/.ssh/id_ed25519.pub ${VPS_HOST}
+
+詳細は scripts/db_readonly_setup.md の「SSH鍵の登録」を参照。
+------------------------------------------------------------
+MSG
+fi
+
+exit ${rc}
