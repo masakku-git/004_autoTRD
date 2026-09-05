@@ -24,8 +24,9 @@ ssh trader@157.180.91.249
 ```
 openssl rand -base64 24
 ```
+7360Fe4B29m8h98cfmAV0LzuWr12CDfP
 
-次に、上で表示されたパスワードを `<ここにパスワード>` の部分に貼り付けて実行します。
+次に psql に入ります。
 
 ```
 sudo -u postgres psql -d autotrd
@@ -33,8 +34,16 @@ sudo -u postgres psql -d autotrd
 
 `autotrd=#` というプロンプトが出たら、以下を1行ずつ貼り付けます。
 
+**1行目だけ注意点があります。** `PASSWORD` の後ろは、手順の先頭で生成した
+パスワードを **シングルクォート `'` で囲んで** 書きます。
+`<` `>` は「ここを置き換えてください」という目印なので、**残さず消してください**。
+
+- 悪い例: `... PASSWORD 7360Fe4B29m8h98cfmAV0LzuWr12CDfP;`（クォート無し → エラー）
+- 悪い例: `... PASSWORD <7360Fe4B29m8h98cfmAV0LzuWr12CDfP>;`（`<>` が残っている → エラー）
+- 良い例: `... PASSWORD '7360Fe4B29m8h98cfmAV0LzuWr12CDfP';`
+
 ```
-CREATE ROLE autotrd_ro WITH LOGIN PASSWORD '<ここにパスワード>';
+CREATE ROLE autotrd_ro WITH LOGIN PASSWORD 'ここにパスワード';
 ```
 ```
 GRANT CONNECT ON DATABASE autotrd TO autotrd_ro;
@@ -65,10 +74,12 @@ ALTER ROLE autotrd_ro SET default_transaction_read_only = on;
 
 ## 3. パスワードを `.pgpass` に保存する（毎回の入力を不要にする）
 
-`<ここにパスワード>` は手順2で決めたものと同じです。
+パスワードは手順2で使ったものと同じです。ここでも `<` `>` は書きません。
+なお `.pgpass` はSQLではないので、パスワード自体をクォートで囲む必要はありません
+（行全体を囲んでいる `'` はシェル用のものなので、そのまま残してください）。
 
 ```
-echo 'localhost:5432:autotrd:autotrd_ro:<ここにパスワード>' >> ~/.pgpass
+echo 'localhost:5432:autotrd:autotrd_ro:ここにパスワード' >> ~/.pgpass
 ```
 ```
 chmod 600 ~/.pgpass
