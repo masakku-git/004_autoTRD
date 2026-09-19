@@ -29,7 +29,12 @@ import yfinance as yf
 # settings は直接使わず、パラメータをローカルに定義
 # strategy プラグインのみ直接importする
 
+from config.settings import settings
+from src.broker.account import AccountInfo
+from src.risk import manager as risk_mod
+from src.strategy import critic as critic_mod
 from src.strategy.base import BaseStrategy, Signal
+from src.strategy.registry import discover_strategies, get_strategy, list_strategies
 
 # スクリーニング対象銘柄
 DEFAULT_UNIVERSE = [
@@ -44,13 +49,12 @@ DEFAULT_UNIVERSE = [
 SP500_TICKER = "^GSPC"
 VIX_TICKER = "^VIX"
 
-# リスク管理パラメータ
-MAX_POSITIONS = 3
-RISK_PER_TRADE_PCT = 0.02
-MAX_PORTFOLIO_EXPOSURE_PCT = 0.90
+# リスク管理パラメータ（本番と同じ config.settings / .env を参照する。
+# CLI の --max-positions / --risk-per-trade で上書き可能）
+MAX_POSITIONS = settings.max_positions
+RISK_PER_TRADE_PCT = settings.risk_per_trade_pct
+MAX_PORTFOLIO_EXPOSURE_PCT = settings.max_portfolio_exposure_pct
 
-# Critic閾値
-APPROVAL_THRESHOLD = 0.40
 
 
 # ===========================================================================
@@ -101,19 +105,15 @@ def fetch_all_data(
 # ===========================================================================
 
 def load_strategies() -> list[BaseStrategy]:
-    """戦略プラグインをインスタンス化して返す"""
-    strategies = []
-    # plugins ディレクトリから直接import（v3版）
-    from src.strategy.plugins.sma_crossover_v3 import SMACrossoverV3
-    from src.strategy.plugins.breakout_v3 import BreakoutV3
-    from src.strategy.plugins.rsi_reversal_v2 import RSIReversalV2
-    from src.strategy.plugins.pullback_v1 import PullbackV1
+    """本番と同じ registry（plugins/ の自動発見）から戦略をインスタンス化して返す。
 
-    strategies.append(SMACrossoverV3())
-    strategies.append(BreakoutV3())
-    strategies.append(RSIReversalV2())
-    strategies.append(PullbackV1())
-    return strategies
+    `_` 始まりのファイル（無効化済み）は本番同様スキップされる。
+    同名戦略が複数バージョンある場合は registry の規則（後勝ち）に従う。
+    """
+    count = discover_strategies()
+    if count == 0:
+        raise SystemExit("エラー: 戦略が1件も登録されませんでした（plugins/ を確認）")
+    return [get_strategy(info["name"]) for info in list_strategies()]
 
 
 def select_strategies_for_regime(all_strategies: list[BaseStrategy], regime: str) -> list[BaseStrategy]:
@@ -217,9 +217,60 @@ def screen_ticker(ticker: str, df: pd.DataFrame) -> dict | None:
     }
 
 
+# 本番 screening_results の履歴（--screening-csv 指定時のみ設定される）。
+# {run_date: [candidate dict(score降順, selected=Trueのみ)]}
+SCREENING_HISTORY: dict[date, list[dict]] | None = None
+_screening_fallbacks: list[date] = []
+
+
+def load_screening_history(csv_path: Path) -> dict[date, list[dict]]:
+    """本番の screening_results.csv から、日ごとの最終ランの selected 銘柄を読む。
+
+    同じ run_date に複数回実行された日（手動再実行）は、銘柄が再登場した時点で
+    ランが切り替わったとみなし、id順で最後のランだけを採用する。
+    """
+    df = pd.read_csv(csv_path).sort_values("id")
+    history: dict[date, list[dict]] = {}
+    for run_date, grp in df.groupby("run_date"):
+        seen: set[str] = set()
+        block: list = []
+        for row in grp.itertuples():
+            if row.ticker in seen:
+                seen, block = set(), []
+            seen.add(row.ticker)
+            block.append(row)
+        picked = [
+            {"ticker": r.ticker, "score": float(r.score)}
+            for r in block if r.selected == "t"
+        ]
+        picked.sort(key=lambda c: c["score"], reverse=True)
+        history[date.fromisoformat(str(run_date))] = picked
+    return history
+
+
+def _screening_from_history(sim_date: date) -> list[dict] | None:
+    """sim_date の終値を使う本番ランの結果を返す。
+
+    本番は JST 22:00（米国寄り付き前）に前営業日の確定日足でスクリーニングするため、
+    sim_date の終値を見るランは「sim_date より後で最初の run_date」。該当なしなら None。
+    """
+    nxt = [d for d in SCREENING_HISTORY if d > sim_date]
+    if not nxt:
+        return None
+    run_date = min(nxt)
+    if (run_date - sim_date).days > 4:  # 履歴が欠けている日は無関係なランを使わない
+        return None
+    return SCREENING_HISTORY[run_date]
+
+
 def run_screening_at(
     all_data: dict[str, pd.DataFrame], sim_date: date, top_n: int = 15
 ) -> list[dict]:
+    if SCREENING_HISTORY is not None:
+        hist = _screening_from_history(sim_date)
+        if hist is not None:
+            return hist[:top_n]
+        _screening_fallbacks.append(sim_date)  # 固定ユニバースで代替（下で計算）
     candidates = []
     for ticker in DEFAULT_UNIVERSE:
         df = all_data.get(ticker)
@@ -241,100 +292,54 @@ def run_screening_at(
 # Critic（DB書き込み不要版 — ロジックを直接実装）
 # ===========================================================================
 
+def _recent_loss_check_local(closed_trades: list[dict], sim_date: date):
+    """本番 check_recent_loss_on_same_ticker のインメモリ版（DBの代わりに sim の決済履歴を見る）。"""
+    def check(signal: Signal, df: pd.DataFrame, market_condition: dict):
+        if signal.action != "BUY":
+            return []
+        losses = sorted(
+            (t for t in closed_trades
+             if t["ticker"] == signal.ticker and t["pnl"] < 0 and t["exit_date"] <= sim_date),
+            key=lambda t: t["exit_date"], reverse=True,
+        )[:3]
+        if len(losses) >= 2:
+            total = sum(t["pnl"] for t in losses)
+            return [critic_mod.Objection(
+                check="recent_loss_on_ticker", penalty=0.20,
+                reason=f"{len(losses)} recent losing trades on {signal.ticker} (total ${total:.2f})",
+            )]
+        return []
+    return check
+
+
 def evaluate_signal_local(
-    signal: Signal, df: pd.DataFrame, market_condition: dict
+    signal: Signal, df: pd.DataFrame, market_condition: dict,
+    closed_trades: list[dict] | None = None, sim_date: date | None = None,
 ) -> dict:
-    """シグナルを批判的に評価する（DB不要版）"""
+    """本番 src/strategy/critic.py の全チェックをそのまま適用する（DB書き込みなし）。
+
+    ロジックの二重管理を避けるため、チェック関数は本番のものを import して使う。
+    DB参照する recent_loss チェックだけ、sim の決済履歴を見るインメモリ版に差し替える。
+    """
+    closed_trades = closed_trades or []
     objections = []
+    for check_fn in critic_mod.ALL_CHECKS:
+        if check_fn is critic_mod.check_recent_loss_on_same_ticker:
+            check_fn = _recent_loss_check_local(closed_trades, sim_date or date.max)
+        try:
+            objections.extend(check_fn(signal, df, market_condition))
+        except Exception as e:
+            print(f"  警告: Critic check {getattr(check_fn, '__name__', check_fn)} 失敗: {e}")
 
-    # チェック1: トレンド矛盾
-    trend = market_condition.get("sp500_trend", "neutral")
-    if signal.action == "BUY" and trend == "bear":
-        objections.append({"check": "trend_contradiction", "penalty": 0.25,
-                           "reason": "弱気相場での買いエントリー"})
-    elif signal.action == "BUY" and trend == "neutral":
-        objections.append({"check": "trend_contradiction", "penalty": 0.05,
-                           "reason": "市場トレンドが中立 — 上昇の追い風なし"})
-
-    # チェック2: VIXリスク
-    vix = market_condition.get("vix_level", 20)
-    if signal.action == "BUY":
-        if vix > 35:
-            objections.append({"check": "vix_risk", "penalty": 0.30,
-                               "reason": f"VIX {vix:.1f} — 極度の恐怖"})
-        elif vix > 25:
-            objections.append({"check": "vix_risk", "penalty": 0.15,
-                               "reason": f"VIX {vix:.1f} — ボラティリティ上昇"})
-
-    # チェック3: 出来高減少
-    if len(df) >= 20 and signal.action == "BUY":
-        recent_vol = float(df["Volume"].iloc[-5:].mean())
-        prior_vol = float(df["Volume"].iloc[-20:-5].mean())
-        if prior_vol > 0 and recent_vol < prior_vol * 0.7:
-            objections.append({"check": "volume_decline", "penalty": 0.20,
-                               "reason": f"出来高減少: {recent_vol:,.0f} vs {prior_vol:,.0f}"})
-
-    # チェック4: 過度な値動き
-    if len(df) >= 21:
-        close = df["Close"]
-        pct_5d = (float(close.iloc[-1]) / float(close.iloc[-6]) - 1) * 100
-        pct_20d = (float(close.iloc[-1]) / float(close.iloc[-21]) - 1) * 100
-        if signal.action == "BUY":
-            if pct_5d > 10:
-                objections.append({"check": "overextended", "penalty": 0.25,
-                                   "reason": f"5日で{pct_5d:.1f}%上昇 — 高値追い"})
-            elif pct_20d > 20:
-                objections.append({"check": "overextended", "penalty": 0.15,
-                                   "reason": f"20日で{pct_20d:.1f}%上昇 — 平均回帰リスク"})
-
-    # チェック5: リスク/リワード比
-    if signal.action == "BUY":
-        current_price = float(df["Close"].iloc[-1])
-        risk = abs(current_price - signal.stop_loss)
-        reward = abs(signal.take_profit - current_price)
-        if risk > 0:
-            rr = reward / risk
-            if rr < 1.0:
-                objections.append({"check": "risk_reward", "penalty": 0.30,
-                                   "reason": f"R/R比 {rr:.2f}:1 — リスク過大"})
-            elif rr < 1.5:
-                objections.append({"check": "risk_reward", "penalty": 0.10,
-                                   "reason": f"R/R比 {rr:.2f}:1 — 最低1.5:1推奨"})
-
-    # チェック6: レジスタンス近接
-    if len(df) >= 60 and signal.action == "BUY":
-        current_price = float(df["Close"].iloc[-1])
-        high_60d = float(df["High"].iloc[-60:].max())
-        if high_60d > 0 and (high_60d - current_price) / high_60d < 0.02:
-            objections.append({"check": "resistance", "penalty": 0.08,
-                               "reason": f"60日高値${high_60d:.2f}の2%以内"})
-
-    # チェック7: 流動性
-    if len(df) >= 20 and signal.action == "BUY":
-        avg_vol = float(df["Volume"].iloc[-20:].mean())
-        current_price = float(df["Close"].iloc[-1])
-        daily_dollar_vol = avg_vol * current_price
-        if daily_dollar_vol < 5_000_000:
-            objections.append({"check": "low_liquidity", "penalty": 0.15,
-                               "reason": f"日次出来高${daily_dollar_vol:,.0f} < $5M"})
-
-    # チェック8: 短期下落トレンド（フォーリングナイフ検出）
-    if len(df) >= 10 and signal.action == "BUY":
-        close = df["Close"]
-        pct_5d = (float(close.iloc[-1]) / float(close.iloc[-6]) - 1) * 100
-        if pct_5d < -3:
-            objections.append({"check": "short_term_downtrend", "penalty": 0.15,
-                               "reason": f"5日で{pct_5d:.1f}%下落 — フォーリングナイフ"})
-
-    total_penalty = sum(o["penalty"] for o in objections)
+    total_penalty = sum(o.penalty for o in objections)
     adjusted = max(signal.confidence - total_penalty, 0.0)
-    approved = adjusted >= APPROVAL_THRESHOLD
-
     return {
-        "approved": approved,
+        "approved": adjusted >= critic_mod.APPROVAL_THRESHOLD,
         "original_confidence": signal.confidence,
         "adjusted_confidence": adjusted,
-        "objections": objections,
+        "objections": [
+            {"check": o.check, "penalty": o.penalty, "reason": o.reason} for o in objections
+        ],
     }
 
 
@@ -343,46 +348,21 @@ def evaluate_signal_local(
 # ===========================================================================
 
 def approve_trade_local(signal: Signal, total_equity: float, cash: float,
-                        market_value: float, num_positions: int) -> dict:
-    """トレード承認（DB不要版）"""
-    if signal.action == "SELL":
-        return {"approved": True, "quantity": 0, "reason": "売却承認"}
+                        market_value: float, positions: list[dict],
+                        market_condition: dict | None = None) -> dict:
+    """本番 src/risk/manager.approve_trade をそのまま呼ぶ（DBアクセスだけ差し替え）。
 
-    if num_positions >= MAX_POSITIONS:
-        return {"approved": False, "quantity": 0,
-                "reason": f"ポジション上限 ({num_positions}/{MAX_POSITIONS})"}
-
-    if signal.stop_loss <= 0:
-        return {"approved": False, "quantity": 0, "reason": "ストップロスなし"}
-
-    max_investment = total_equity * MAX_PORTFOLIO_EXPOSURE_PCT
-    available_cash = min(cash, max_investment - market_value)
-    if available_cash <= 0:
-        return {"approved": False, "quantity": 0, "reason": "エクスポージャー上限"}
-
-    risk_amount = total_equity * RISK_PER_TRADE_PCT
-    entry_est = signal.price if signal.price > 0 else (signal.stop_loss + signal.take_profit) / 2
-    risk_per_share = abs(entry_est - signal.stop_loss)
-    if risk_per_share <= 0:
-        return {"approved": False, "quantity": 0, "reason": "リスク/株算出不可"}
-
-    qty = int(risk_amount / risk_per_share)
-    if qty <= 0:
-        return {"approved": False, "quantity": 0, "reason": "数量0"}
-
-    # 40%上限
-    if qty * entry_est > total_equity * 0.40:
-        qty = int(total_equity * 0.40 / entry_est)
-
-    # 現金上限
-    if qty * entry_est > available_cash:
-        qty = int(available_cash / entry_est)
-
-    if qty <= 0:
-        return {"approved": False, "quantity": 0, "reason": "現金不足"}
-
-    return {"approved": True, "quantity": qty,
-            "reason": f"承認: {qty}株, リスク=${risk_amount:.2f}"}
+    settings（max_positions/リスク率/20%上限/レジーム乗数）を本番と共有するため、
+    リスクルールの変更が自動でシミュレータにも反映される。
+    """
+    held = {p["ticker"] for p in positions}
+    risk_mod._open_trade_tickers = lambda: set(held)  # DB不要化（ignored_tickers判定用）
+    account = AccountInfo(
+        total_equity=total_equity, cash=cash, market_value=market_value,
+        positions=[{"ticker": tk, "qty": 1} for tk in sorted(held)],
+    )
+    res = risk_mod.approve_trade(signal, account, market_condition)
+    return {"approved": res.approved, "quantity": res.quantity, "reason": res.reason}
 
 
 # ===========================================================================
@@ -395,6 +375,7 @@ class SimulatedPortfolio:
         self.cash = initial_cash
         self.positions: list[dict] = []
         self.closed_trades: list[dict] = []
+        self.partial_trades: list[dict] = []  # 段階利確(TP1)の部分決済
         self.daily_snapshots: list[dict] = []
 
     def get_market_value(self, prices: dict[str, float]) -> float:
@@ -427,8 +408,10 @@ class SimulatedPortfolio:
         return pos
 
     def sell(self, ticker: str, price: float, sim_date: date, reason: str,
-             strategy_name: str = "", regime: str = ""):
-        pos = next((p for p in self.positions if p["ticker"] == ticker), None)
+             strategy_name: str = "", regime: str = "", pos: dict | None = None):
+        """ロットを全量決済する。pos 未指定なら同銘柄の先頭ロット。"""
+        if pos is None:
+            pos = next((p for p in self.positions if p["ticker"] == ticker), None)
         if not pos:
             return None
         proceeds = pos["qty"] * price
@@ -472,6 +455,18 @@ class SimulatedPortfolio:
 # 1日分のシミュレーション
 # ===========================================================================
 
+def _next_open(df: pd.DataFrame, sim_date: date, fallback: float) -> float:
+    """sim_date の翌営業日の始値（本番は判定日の翌米国セッション寄りで成行約定する）。
+
+    翌営業日のデータが無い（シミュ最終日）場合は fallback（当日終値）を返す。
+    """
+    nxt = df[df.index > pd.Timestamp(sim_date)]
+    if nxt.empty:
+        return fallback
+    o = float(nxt["Open"].iloc[0])
+    return o if o > 0 else fallback
+
+
 def simulate_one_day(
     sim_date: date,
     portfolio: SimulatedPortfolio,
@@ -480,241 +475,207 @@ def simulate_one_day(
     vix_df: pd.DataFrame,
     all_strategies: list[BaseStrategy],
 ) -> dict:
-    day_report = {"date": sim_date, "executed": [], "rejected": [], "market_condition": {}}
+    """本番 src/main.py run_daily() の判定順序を再現する。
 
-    # 市場環境判定
+    本番との対応:
+      - 判定は sim_date の確定日足、約定は翌営業日の始値（_next_open）
+      - Step3 強制エグジットはロット単位・購入戦略の check_exit → SL → TP1 → TP → 最大保有
+      - Step5 SELLシグナルは購入戦略のみで判定（レジームでの絞り込みなし）
+      - Step7 BUYは同一銘柄の保有中でも判定（本番は買い増しを止めていない）
+      - Step8 BUYは screen_score 降順。承認前の現金は見積りコスト分だけ手動で差し引く
+        （本番同様、承認ループ中は保有ポジション数を更新しない）
+    未再現: 日次損失上限による新規停止、データ劣化時の停止、moomoo側の約定エラー。
+    """
+    day_report = {"date": sim_date, "executed": [], "rejected": [], "market_condition": {}}
+    by_name = {s.name: s for s in all_strategies}
+
     market_condition = assess_market_condition_at(sp500_df, vix_df, sim_date)
     day_report["market_condition"] = market_condition
+    regime = market_condition.get("regime", "range")
+    strategies = select_strategies_for_regime(all_strategies, regime)
 
-    # 当日の終値マップ
-    current_prices = {}
+    current_prices: dict[str, float] = {}
     for ticker, df in all_data.items():
         df_slice = df[df.index <= pd.Timestamp(sim_date)]
         if not df_slice.empty:
             current_prices[ticker] = float(df_slice["Close"].iloc[-1])
 
-    # レジームに合った戦略
-    regime = market_condition.get("regime", "range")
-    strategies = select_strategies_for_regime(all_strategies, regime)
-
-    buy_signals = []       # (signal, strategy_name)
-    sell_signals = []      # (signal, strategy_name)
-    rejected_signals = []  # (signal, verdict)
-
-    # --- 強制エグジット（SL/TP/時間ベース） ---
-    forced_exit_tickers = set()
-    for pos in list(portfolio.positions):
-        ticker = pos["ticker"]
-        price = current_prices.get(ticker, pos["entry_price"])
-        sl = pos.get("stop_loss", 0)
-        tp = pos.get("take_profit", 0)
-        max_hold = pos.get("max_hold_days", 20)
-        holding_days = (sim_date - pos["entry_date"]).days
-
-        # 最高値トラッキング更新（トレーリングストップ用）
-        if price > pos.get("highest_price", pos["entry_price"]):
-            pos["highest_price"] = price
-
-        # ストップロス発動
-        if sl > 0 and price <= sl:
-            trade = portfolio.sell(ticker, price, sim_date,
-                                   f"ストップロス発動 (SL=${sl:.2f}, 現在=${price:.2f})",
-                                   strategy_name=pos.get("strategy", ""),
-                                   regime=regime)
-            if trade:
-                day_report["executed"].append(
-                    f"STOP-LOSS {trade['qty']}x {ticker} @ ${price:.2f} "
-                    f"(損益: ${trade['pnl']:+.2f} / {trade['pnl_pct']:+.1f}%)")
-                forced_exit_tickers.add(ticker)
-            continue
-
-        # 段階利確TP1到達（半分決済）
-        tp1 = pos.get("take_profit_1", 0)
-        if not pos.get("tp1_hit") and tp1 > 0 and price >= tp1:
-            half_qty = max(1, pos["qty"] // 2)
-            if half_qty < pos["qty"]:
-                partial_pnl = (price - pos["entry_price"]) * half_qty
-                portfolio.cash += half_qty * price
-                pos["qty"] -= half_qty
-                pos["tp1_hit"] = True  # TP1消費済み（本番同様、目標値自体は残す）
-                day_report["executed"].append(
-                    f"TAKE-PROFIT-1 {half_qty}x {ticker} @ ${price:.2f} "
-                    f"(段階利確 PnL: ${partial_pnl:+.2f})")
-            else:
-                # qty=1の場合は全決済
-                trade = portfolio.sell(ticker, price, sim_date,
-                                       f"段階利確TP1到達 (TP1=${tp1:.2f}, 現在=${price:.2f})",
-                                       strategy_name=pos.get("strategy", ""),
-                                       regime=regime)
-                if trade:
-                    day_report["executed"].append(
-                        f"TAKE-PROFIT-1 {trade['qty']}x {ticker} @ ${price:.2f} "
-                        f"(損益: ${trade['pnl']:+.2f} / {trade['pnl_pct']:+.1f}%)")
-                    forced_exit_tickers.add(ticker)
-            continue
-
-        # 戦略固有エグジットチェック（check_exitメソッド）
-        suppress_tp = False
-        for strategy in strategies:
-            df = all_data.get(ticker)
-            if df is not None:
-                df_slice = df[df.index <= pd.Timestamp(sim_date)]
-                if not df_slice.empty:
-                    # take_profit_1 / tp1_hit も渡す。TP1到達後のみ有効な戦略ロジック
-                    # （breakout_v6のRSI決済）が本番と同じ条件で動くようにするため。
-                    trade_info = {"take_profit": tp, "stop_loss": sl,
-                                    "take_profit_1": tp1,
-                                    "tp1_hit": bool(pos.get("tp1_hit")),
-                                    "entry_price": pos["entry_price"],
-                                    "highest_price": pos.get("highest_price", pos["entry_price"])}
-                    exit_decision = getattr(strategy, 'check_exit', lambda *a: None)(ticker, df_slice, trade_info)
-                    if exit_decision is not None:
-                        if exit_decision.should_exit:
-                            trade = portfolio.sell(ticker, price, sim_date,
-                                                   exit_decision.reason,
-                                                   strategy_name=pos.get("strategy", ""),
-                                                   regime=regime)
-                            if trade:
-                                day_report["executed"].append(
-                                    f"STRATEGY-EXIT {trade['qty']}x {ticker} @ ${price:.2f} "
-                                    f"(損益: ${trade['pnl']:+.2f} / {trade['pnl_pct']:+.1f}%) "
-                                    f"[{exit_decision.reason[:50]}]")
-                                forced_exit_tickers.add(ticker)
-                            break
-                        elif exit_decision.suppress_tp:
-                            suppress_tp = True
-                        break
-
-        if ticker in forced_exit_tickers:
-            continue
-
-        # 利確ターゲット到達（suppress_tp=Trueの場合はスキップ）
-        if not suppress_tp and tp > 0 and price >= tp:
-            trade = portfolio.sell(ticker, price, sim_date,
-                                   f"利確ターゲット到達 (TP=${tp:.2f}, 現在=${price:.2f})",
-                                   strategy_name=pos.get("strategy", ""),
-                                   regime=regime)
-            if trade:
-                day_report["executed"].append(
-                    f"TAKE-PROFIT {trade['qty']}x {ticker} @ ${price:.2f} "
-                    f"(損益: ${trade['pnl']:+.2f} / {trade['pnl_pct']:+.1f}%)")
-                forced_exit_tickers.add(ticker)
-            continue
-
-        # 最大保有期間超過
-        if holding_days >= max_hold:
-            trade = portfolio.sell(ticker, price, sim_date,
-                                   f"最大保有期間{max_hold}日超過 ({holding_days}日経過)",
-                                   strategy_name=pos.get("strategy", ""),
-                                   regime=regime)
-            if trade:
-                day_report["executed"].append(
-                    f"TIME-EXIT {trade['qty']}x {ticker} @ ${price:.2f} "
-                    f"(損益: ${trade['pnl']:+.2f} / {trade['pnl_pct']:+.1f}%, {holding_days}日)")
-                forced_exit_tickers.add(ticker)
-            continue
-
-    # --- 保有ポジションのSELLチェック（強制エグジット済みを除く） ---
-    for pos in list(portfolio.positions):
-        ticker = pos["ticker"]
-        if ticker in forced_exit_tickers:
-            continue
+    def slice_of(ticker: str) -> pd.DataFrame | None:
         df = all_data.get(ticker)
         if df is None:
-            continue
-        df_slice = df[df.index <= pd.Timestamp(sim_date)]
-        if df_slice.empty:
-            continue
-        for strategy in strategies:
-            signal = strategy.generate_signals(ticker, df_slice, market_condition)
-            if signal and signal.action == "SELL":
-                verdict = evaluate_signal_local(signal, df_slice, market_condition)
-                if verdict["approved"]:
-                    signal.confidence = verdict["adjusted_confidence"]
-                    sell_signals.append((signal, strategy.name))
-                else:
-                    rejected_signals.append((signal, verdict))
-                break
+            return None
+        s = df[df.index <= pd.Timestamp(sim_date)]
+        return None if s.empty else s
 
-    # --- スクリーニング→BUYチェック ---
+    def fill_price(ticker: str) -> float:
+        return _next_open(all_data[ticker], sim_date, current_prices.get(ticker, 0.0))
+
+    buy_signals: list[tuple[Signal, str]] = []
+    sell_signals: list[tuple[Signal, str]] = []
+    rejected_signals: list[tuple[Signal, dict]] = []
+
+    # --- Step 3: 強制エグジット（ロット単位） ---
+    for pos in list(portfolio.positions):
+        ticker = pos["ticker"]
+        df_slice = slice_of(ticker)
+        if df_slice is None:
+            continue
+        price = current_prices[ticker]
+        fill = fill_price(ticker)
+        today_high = float(df_slice["High"].iloc[-1])
+        if today_high > pos.get("highest_price", pos["entry_price"]):
+            pos["highest_price"] = today_high  # 本番: _update_highest_price は日中高値
+
+        sl = pos.get("stop_loss", 0)
+        tp = pos.get("take_profit", 0)
+        tp1 = pos.get("take_profit_1", 0)
+        tp1_hit = bool(pos.get("tp1_hit"))
+        max_hold = pos.get("max_hold_days", 20) or 20
+        holding_days = (sim_date - pos["entry_date"]).days
+        strat_name = pos.get("strategy", "")
+
+        def do_sell(label: str, reason: str) -> None:
+            trade = portfolio.sell(ticker, fill, sim_date, reason,
+                                   strategy_name=strat_name, regime=regime, pos=pos)
+            if trade:
+                day_report["executed"].append(
+                    f"{label} {trade['qty']}x {ticker} @ ${fill:.2f} "
+                    f"(損益: ${trade['pnl']:+.2f} / {trade['pnl_pct']:+.1f}%) [{reason[:50]}]")
+
+        # (1) 購入戦略の check_exit
+        suppress_tp = False
+        strategy = by_name.get(strat_name)
+        if strategy is not None:
+            lot = {"take_profit": tp, "stop_loss": sl, "take_profit_1": tp1,
+                   "tp1_hit": tp1_hit, "entry_price": pos["entry_price"],
+                   "highest_price": pos.get("highest_price", pos["entry_price"]),
+                   "entry_date": pos["entry_date"], "max_hold_days": max_hold,
+                   "strategy_name": strat_name, "quantity": pos["qty"]}
+            decision = strategy.check_exit(ticker, df_slice, lot)
+            if decision is not None:
+                if decision.should_exit:
+                    do_sell("STRATEGY-EXIT", decision.reason)
+                    continue
+                suppress_tp = decision.suppress_tp
+
+        # (2) SL → (3) TP1 → (4) TP → (5) 最大保有期間
+        if sl > 0 and price <= sl:
+            do_sell("STOP-LOSS", f"ストップロス発動 (SL=${sl:.2f}, 現在=${price:.2f})")
+        elif not tp1_hit and tp1 > 0 and price >= tp1:
+            half_qty = max(pos["qty"] // 2, 1)
+            if half_qty < pos["qty"]:
+                partial_pnl = (fill - pos["entry_price"]) * half_qty
+                portfolio.cash += half_qty * fill
+                pos["qty"] -= half_qty
+                pos["tp1_hit"] = True
+                portfolio.partial_trades.append({
+                    "ticker": ticker, "qty": half_qty, "entry_date": pos["entry_date"],
+                    "exit_date": sim_date, "pnl": round(partial_pnl, 2),
+                    "entry_strategy": strat_name})
+                day_report["executed"].append(
+                    f"TAKE-PROFIT-1 {half_qty}x {ticker} @ ${fill:.2f} "
+                    f"(段階利確 PnL: ${partial_pnl:+.2f})")
+            else:
+                do_sell("TAKE-PROFIT-1", f"段階利確TP1到達・全量決済 (TP1=${tp1:.2f}, 現在=${price:.2f})")
+        elif not suppress_tp and tp > 0 and price >= tp:
+            do_sell("TAKE-PROFIT", f"利確ターゲット到達 (TP=${tp:.2f}, 現在=${price:.2f})")
+        elif max_hold > 0 and holding_days >= max_hold:
+            do_sell("TIME-EXIT", f"最大保有期間{max_hold}日超過 ({holding_days}日経過)")
+
+    # --- Step 5: 保有銘柄のSELLシグナル（購入戦略のみ） ---
+    for ticker in sorted({p["ticker"] for p in portfolio.positions}):
+        df_slice = slice_of(ticker)
+        if df_slice is None:
+            continue
+        lot = next(p for p in portfolio.positions if p["ticker"] == ticker)
+        strategy = by_name.get(lot.get("strategy", ""))
+        if strategy is None:
+            continue
+        signal = strategy.generate_signals(ticker, df_slice, market_condition)
+        if signal and signal.action == "SELL":
+            verdict = evaluate_signal_local(signal, df_slice, market_condition,
+                                            portfolio.closed_trades, sim_date)
+            if verdict["approved"]:
+                signal.confidence = verdict["adjusted_confidence"]
+                sell_signals.append((signal, strategy.name))
+            else:
+                rejected_signals.append((signal, verdict))
+
+    # --- Step 6-7: スクリーニング → BUYシグナル（保有中の銘柄も対象） ---
     candidates = run_screening_at(all_data, sim_date)
     for candidate in candidates:
         ticker = candidate["ticker"]
-        if any(p["ticker"] == ticker for p in portfolio.positions):
-            continue
-        df = all_data.get(ticker)
-        if df is None:
-            continue
-        df_slice = df[df.index <= pd.Timestamp(sim_date)]
-        if df_slice.empty:
+        df_slice = slice_of(ticker)
+        if df_slice is None:
             continue
         for strategy in strategies:
             signal = strategy.generate_signals(ticker, df_slice, market_condition)
             if signal and signal.action == "BUY":
-                verdict = evaluate_signal_local(signal, df_slice, market_condition)
+                verdict = evaluate_signal_local(signal, df_slice, market_condition,
+                                                portfolio.closed_trades, sim_date)
                 if verdict["approved"]:
                     signal.confidence = verdict["adjusted_confidence"]
+                    signal.screen_score = float(candidate.get("score", 0.0))
                     buy_signals.append((signal, strategy.name))
                 else:
                     rejected_signals.append((signal, verdict))
                 break
 
-    # --- 約定シミュレーション ---
-
-    # 売り先行
+    # --- Step 8: 約定（売り先行 → 買いは screen_score 降順） ---
     for signal, strat_name in sell_signals:
-        price = current_prices.get(signal.ticker, 0)
-        if price > 0:
-            trade = portfolio.sell(signal.ticker, price, sim_date, signal.reason,
-                                  strategy_name=strat_name, regime=regime)
-            if trade:
-                day_report["executed"].append(
-                    f"SELL {trade['qty']}x {signal.ticker} @ ${price:.2f} "
-                    f"(損益: ${trade['pnl']:+.2f} / {trade['pnl_pct']:+.1f}%) "
-                    f"[{signal.reason[:50]}]"
-                )
+        while True:  # 銘柄の全ロットを決済（本番は銘柄単位の全数量を売る）
+            lot = next((p for p in portfolio.positions if p["ticker"] == signal.ticker), None)
+            if lot is None:
+                break
+            fill = fill_price(signal.ticker)
+            trade = portfolio.sell(signal.ticker, fill, sim_date, signal.reason,
+                                   strategy_name=strat_name, regime=regime, pos=lot)
+            if not trade:
+                break
+            day_report["executed"].append(
+                f"SELL {trade['qty']}x {signal.ticker} @ ${fill:.2f} "
+                f"(損益: ${trade['pnl']:+.2f} / {trade['pnl_pct']:+.1f}%) [{signal.reason[:50]}]")
 
-    # 買い（信頼度順）
-    buy_signals.sort(key=lambda s: s[0].confidence, reverse=True)
+    buy_signals.sort(key=lambda s: s[0].screen_score, reverse=True)
+    account_cash = portfolio.cash
+    total_eq = portfolio.get_total_equity(current_prices)
+    mv = portfolio.get_market_value(current_prices)
+    held_positions = [{"ticker": tk} for tk in sorted({p["ticker"] for p in portfolio.positions})]
     for signal, strat_name in buy_signals:
-        total_eq = portfolio.get_total_equity(current_prices)
-        mv = portfolio.get_market_value(current_prices)
         approval = approve_trade_local(
-            signal, total_eq, portfolio.cash, mv, len(portfolio.positions)
-        )
+            signal, total_eq, account_cash, mv, held_positions, market_condition)
         if approval["approved"] and approval["quantity"] > 0:
-            price = current_prices.get(signal.ticker, 0)
-            if price > 0:
-                pos = portfolio.buy(signal.ticker, approval["quantity"], price, sim_date, signal.reason,
-                                    strategy_name=strat_name, regime=regime,
-                                    confidence=signal.confidence,
-                                    entry_reason=signal.reason,
-                                    stop_loss=signal.stop_loss,
-                                    take_profit=signal.take_profit,
-                                    take_profit_1=getattr(signal, 'take_profit_1', 0.0),
-                                    max_hold_days=signal.max_hold_days)
-                if pos:
-                    day_report["executed"].append(
-                        f"BUY {approval['quantity']}x {signal.ticker} @ ${price:.2f} "
-                        f"(コスト: ${approval['quantity'] * price:,.2f}) "
-                        f"[{signal.reason[:50]}]"
-                    )
+            qty = approval["quantity"]
+            fill = fill_price(signal.ticker)
+            if fill <= 0:
+                continue
+            pos = portfolio.buy(signal.ticker, qty, fill, sim_date, signal.reason,
+                                strategy_name=strat_name, regime=regime,
+                                confidence=signal.confidence, entry_reason=signal.reason,
+                                stop_loss=signal.stop_loss, take_profit=signal.take_profit,
+                                take_profit_1=getattr(signal, "take_profit_1", 0.0),
+                                max_hold_days=signal.max_hold_days)
+            account_cash = max(0.0, account_cash - (signal.price * qty if signal.price else 0))
+            if pos:
+                day_report["executed"].append(
+                    f"BUY {qty}x {signal.ticker} @ ${fill:.2f} "
+                    f"(コスト: ${qty * fill:,.2f}) [{signal.reason[:50]}]")
+        else:
+            day_report["rejected"].append(
+                f"BUY {signal.ticker} (リスク管理却下: {approval['reason'][:60]})")
 
-    # 却下シグナル
     for signal, verdict in rejected_signals:
         top_obj = verdict["objections"][0]["reason"] if verdict["objections"] else "N/A"
         day_report["rejected"].append(
             f"{signal.action} {signal.ticker} "
             f"(信頼度 {verdict['original_confidence']:.2f}->{verdict['adjusted_confidence']:.2f}) "
-            f"[{top_obj[:60]}]"
-        )
+            f"[{top_obj[:60]}]")
 
     total_equity = portfolio.snapshot(sim_date, current_prices)
     day_report["total_equity"] = total_equity
     day_report["cash"] = portfolio.cash
     day_report["num_positions"] = len(portfolio.positions)
     day_report["candidates_count"] = len(candidates)
-
     return day_report
 
 
@@ -788,7 +749,17 @@ def print_summary(portfolio: SimulatedPortfolio):
         wins = sum(1 for t in portfolio.closed_trades if t["pnl"] > 0)
         print(f"  勝率:       {wins}/{len(portfolio.closed_trades)} ({wins/len(portfolio.closed_trades)*100:.0f}%)")
         total_pnl = sum(t["pnl"] for t in portfolio.closed_trades)
-        print(f"  実現損益:   ${total_pnl:+,.2f}")
+        print(f"  実現損益:   ${total_pnl:+,.2f}  (全決済分のみ)")
+        partial = sum(x["pnl"] for x in portfolio.partial_trades)
+        print(f"  TP1部分決済: ${partial:+,.2f} ({len(portfolio.partial_trades)}回)  "
+              f"→ 実現損益合計 ${total_pnl + partial:+,.2f}")
+        by_strat: dict[str, list[float]] = {}
+        for t in portfolio.closed_trades:
+            by_strat.setdefault(t.get("entry_strategy") or "?", []).append(t["pnl"])
+        print("  [戦略別（決済済み）]")
+        for name, pnls in sorted(by_strat.items()):
+            w = sum(1 for x in pnls if x > 0)
+            print(f"    {name:<14} {len(pnls):>3}件  ${sum(pnls):+9.2f}  勝率{w/len(pnls)*100:.0f}%")
         print()
         print("  [決済済みトレード一覧]")
         for t in portfolio.closed_trades:
@@ -2316,7 +2287,20 @@ def main():
     )
     parser.add_argument("--capital", type=float, default=3300.0, help="初期資金 (デフォルト: $3,300)")
     parser.add_argument("--output", type=str, default=None, help="HTML出力先パス (デフォルト: doc/simulation_YYYYMMDD.html)")
+    parser.add_argument("--max-positions", type=int, default=None,
+                        help=f"同時保有上限 (デフォルト: settings={settings.max_positions})")
+    parser.add_argument("--risk-per-trade", type=float, default=None,
+                        help=f"1トレードのリスク率 (デフォルト: settings={settings.risk_per_trade_pct})")
+    parser.add_argument("--screening-csv", type=str, default=None,
+                        help="本番 screening_results.csv を使い、日ごとの候補銘柄を本番実績に合わせる"
+                             "（未指定なら固定ユニバースでスクリーニング）")
     args = parser.parse_args()
+
+    global MAX_POSITIONS, RISK_PER_TRADE_PCT, SCREENING_HISTORY
+    if args.max_positions is not None:
+        MAX_POSITIONS = args.max_positions
+    if args.risk_per_trade is not None:
+        RISK_PER_TRADE_PCT = args.risk_per_trade
 
     sim_dates = parse_dates(args.dates)
     if not sim_dates:
@@ -2325,13 +2309,23 @@ def main():
 
     print(f"シミュレーション日付: {[str(d) for d in sim_dates]}")
     print(f"初期資金: ${args.capital:,.2f}")
+    print(f"リスク設定: max_positions={MAX_POSITIONS}, risk_per_trade={RISK_PER_TRADE_PCT}, "
+          f"exposure上限={MAX_PORTFOLIO_EXPOSURE_PCT}")
+    extra_tickers: set[str] = set()
+    if args.screening_csv:
+        SCREENING_HISTORY = load_screening_history(Path(args.screening_csv))
+        extra_tickers = {c["ticker"] for v in SCREENING_HISTORY.values() for c in v}
+        print(f"ユニバース: 本番 screening_results を使用 "
+              f"({len(SCREENING_HISTORY)}ラン / 延べ{len(extra_tickers)}銘柄)")
+    else:
+        print(f"ユニバース: 固定{len(DEFAULT_UNIVERSE)}銘柄（本番の universe_builder は使用しない）")
 
     # 戦略読み込み
     all_strategies = load_strategies()
-    print(f"戦略: {[s.name for s in all_strategies]}")
+    print(f"戦略: {[f'{s.name} v{s.version}' for s in all_strategies]}")
 
     # 全銘柄のデータ取得（シミュレーション開始日から逆算してデータ範囲を決定）
-    all_tickers = list(set(DEFAULT_UNIVERSE + [SP500_TICKER, VIX_TICKER]))
+    all_tickers = list(set(DEFAULT_UNIVERSE) | extra_tickers | {SP500_TICKER, VIX_TICKER})
     print(f"\n価格データを取得中... ({len(all_tickers)}銘柄)")
     all_data = fetch_all_data(all_tickers, sim_start=sim_dates[0])
     print(f"取得成功: {len(all_data)}銘柄")
@@ -2361,6 +2355,9 @@ def main():
         print_report(day_report)
 
     print_summary(portfolio)
+    if SCREENING_HISTORY is not None and _screening_fallbacks:
+        print(f"\n注意: 本番スクリーニング履歴が無い{len(_screening_fallbacks)}日は"
+              f"固定ユニバースで代替: {[str(d) for d in _screening_fallbacks]}")
 
     # HTML レポート出力
     project_root = Path(__file__).parent.parent
