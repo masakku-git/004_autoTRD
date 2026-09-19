@@ -323,6 +323,21 @@ except Exception as e:
     if [ -d ".venv" ]; then source .venv/bin/activate; fi
     pip install -r requirements.txt --quiet
     echo ""
+    # DBスキーマ変更（Alembic）を必ず反映する。失敗を握り潰さない（set -e で中断）。
+    # 反映されないままコードだけ新しくなると、新カラムを参照する処理が本番で落ちるため、
+    # 「デプロイ完了 = DBが最新リビジョン(head)になったことを確認できた状態」とする。
+    echo "Running database migrations..."
+    alembic upgrade head
+    echo ""
+    echo "Verifying migration state..."
+    if ! alembic current 2>/dev/null | grep -q "(head)"; then
+      echo "エラー: DBが最新リビジョン(head)になっていません。alembic current / alembic heads を確認してください。"
+      alembic current || true
+      alembic heads || true
+      exit 1
+    fi
+    alembic current 2>/dev/null | tail -1
+    echo ""
     echo "Deploy complete at $(date)"
     ;;
 
