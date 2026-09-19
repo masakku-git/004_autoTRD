@@ -399,14 +399,17 @@ def test_update_price_cache_retries_with_yfinance_when_moomoo_empty(monkeypatch)
 
 
 def test_update_price_cache_skips_yfinance_retry_without_fetch_window(monkeypatch):
-    """取得対象期間が無い（前日分まで取得済み）ときは再取得しない"""
-    from datetime import date, timedelta
+    """取得対象期間が無い（キャッシュ最新日が確定セッションより先）ときは、0件でもyfinanceで取り直さない
+
+    差分取得の起点はキャッシュ最新日「当日」（未確定足の取り直し）になったため、
+    「最新日 == 確定セッション」では取得窓があり再取得される。窓が無いのは最新日が確定セッションより
+    先の場合のみ。日付を固定して、実行日（土日など）に依存しないようにする。
+    """
+    from datetime import date
 
     monkeypatch.setattr("src.data.fetcher.settings.data_source", "moomoo")
-    monkeypatch.setattr(
-        "src.data.fetcher.get_last_cached_date",
-        lambda t: date.today() - timedelta(days=1),
-    )
+    monkeypatch.setattr("src.data.fetcher.last_completed_us_session", lambda: date(2026, 8, 21))
+    monkeypatch.setattr("src.data.fetcher.get_last_cached_date", lambda t: date(2026, 8, 22))
     monkeypatch.setattr("src.data.fetcher.save_to_cache", lambda t, df: len(df))
     monkeypatch.setattr(
         "src.data.fetcher.fetch_from_moomoo",
