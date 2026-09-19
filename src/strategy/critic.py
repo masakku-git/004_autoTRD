@@ -303,6 +303,91 @@ def check_recent_loss_on_same_ticker(  # チェック7: 同一銘柄での直近
     return objections
 
 
+def position_history_objections(
+    signal: Signal,
+    current_price: float,
+    open_lots: list[dict],
+    last_loss_exit_date,
+    today,
+) -> list[Objection]:
+    """同一銘柄の保有状況・損失履歴から、買い増し/再エントリーを止める（hard reject）。
+
+    DBに依存しない純粋関数（本番はDB、シミュレータはインメモリの履歴を渡す）。
+    open_lots: OPEN中ロットの [{"entry_price", "quantity"}]
+    last_loss_exit_date: 同一銘柄で損失決済した最新の決済日（無ければ None）
+    ルールの閾値は config.settings（0/False で個別に無効化できる）。
+    """
+    from config.settings import settings
+
+    objections: list[Objection] = []
+    if signal.action != "BUY":
+        return objections
+
+    # (1) 含み損中の買い増し（ナンピン）禁止
+    if settings.block_averaging_down and open_lots:
+        qty = sum(l["quantity"] for l in open_lots)
+        if qty > 0:
+            avg = sum(l["entry_price"] * l["quantity"] for l in open_lots) / qty
+            if current_price < avg:
+                objections.append(Objection(
+                    check="averaging_down", penalty=1.0,
+                    reason=f"{signal.ticker} は含み損中(現在値${current_price:.2f} < "
+                           f"平均取得単価${avg:.2f})の買い増し — 却下",
+                ))
+
+    # (2) 同時OPENロット数の上限
+    limit = settings.max_open_lots_per_ticker
+    if limit > 0 and len(open_lots) >= limit:
+        objections.append(Objection(
+            check="max_open_lots", penalty=1.0,
+            reason=f"{signal.ticker} は既にOPEN {len(open_lots)}ロット(上限{limit}) — 却下",
+        ))
+
+    # (3) 損失決済後のクールダウン
+    days = settings.reentry_cooldown_business_days
+    if days > 0 and last_loss_exit_date is not None:
+        elapsed = int(np.busday_count(last_loss_exit_date, today))
+        if elapsed < days:
+            objections.append(Objection(
+                check="reentry_cooldown", penalty=1.0,
+                reason=f"{signal.ticker} は{last_loss_exit_date}に損失決済(経過{elapsed}営業日 < "
+                       f"{days}営業日) — 再エントリー却下",
+            ))
+    return objections
+
+
+def check_position_history(  # チェック10: 同一銘柄の買い増し・再エントリー制御
+    signal: Signal, df: pd.DataFrame, market_condition: dict
+) -> list[Objection]:
+    """trade_log から同一銘柄のOPENロットと直近の損失決済を読み、position_history_objections に渡す。"""
+    if signal.action != "BUY":
+        return []
+
+    from sqlalchemy import select
+
+    from src.models.trade import TradeLog
+    from src.utils.helpers import today_jst
+
+    with get_session() as session:
+        open_rows = session.execute(
+            select(TradeLog).where(TradeLog.ticker == signal.ticker).where(TradeLog.status == "OPEN")
+        ).scalars().all()
+        last_loss = session.execute(
+            select(TradeLog.exit_date)
+            .where(TradeLog.ticker == signal.ticker)
+            .where(TradeLog.status == "CLOSED")
+            .where(TradeLog.pnl < 0)
+            .where(TradeLog.exit_date.is_not(None))
+            .order_by(TradeLog.exit_date.desc())
+            .limit(1)
+        ).scalar_one_or_none()
+        open_lots = [{"entry_price": r.entry_price, "quantity": r.quantity} for r in open_rows]
+
+    return position_history_objections(
+        signal, float(df["Close"].iloc[-1]), open_lots, last_loss, today_jst()
+    )
+
+
 def check_short_term_downtrend(  # チェック8: 短期下落トレンド（フォーリングナイフ検出）
     signal: Signal, df: pd.DataFrame, market_condition: dict
 ) -> list[Objection]:
@@ -365,6 +450,7 @@ ALL_CHECKS = [
     check_recent_loss_on_same_ticker,
     check_short_term_downtrend,
     check_low_liquidity_hours,
+    check_position_history,
 ]
 
 

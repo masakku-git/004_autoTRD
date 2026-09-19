@@ -287,3 +287,80 @@ class TestEvaluateSignalIntegration:
         verdict = evaluate_signal(buy_signal, normal_df, bull_market, "test_strategy", save_to_db=False)
         assert "TEST" in verdict.summary
         assert verdict.summary  # not empty
+
+
+# ---------------------------------------------------------------------------
+# 同一銘柄の買い増し・再エントリー制御（position_history_objections）
+# ---------------------------------------------------------------------------
+from datetime import date  # noqa: E402
+
+from config.settings import settings  # noqa: E402
+from src.strategy.critic import position_history_objections  # noqa: E402
+
+
+@pytest.fixture
+def history_rules(monkeypatch):
+    monkeypatch.setattr(settings, "block_averaging_down", True)
+    monkeypatch.setattr(settings, "max_open_lots_per_ticker", 3)
+    monkeypatch.setattr(settings, "reentry_cooldown_business_days", 5)
+
+
+def _checks(objs):
+    return {o.check for o in objs}
+
+
+def test_averaging_down_is_hard_rejected(buy_signal, history_rules):
+    """先行ロットが含み損（現在値 < 平均取得単価）なら買い増しを却下（penalty=1.0）"""
+    lots = [{"entry_price": 258.67, "quantity": 1}]
+    objs = position_history_objections(buy_signal, 254.17, lots, None, date(2026, 9, 1))
+    assert _checks(objs) == {"averaging_down"}
+    assert objs[0].penalty >= 1.0
+
+
+def test_adding_to_winner_is_allowed(buy_signal, history_rules):
+    """先行ロットが含み益なら買い増しは許可（勝ちパターンを殺さない）"""
+    lots = [{"entry_price": 250.0, "quantity": 1}]
+    assert position_history_objections(buy_signal, 260.0, lots, None, date(2026, 9, 1)) == []
+
+
+def test_average_price_is_quantity_weighted(buy_signal, history_rules):
+    lots = [{"entry_price": 100.0, "quantity": 1}, {"entry_price": 130.0, "quantity": 3}]
+    # 加重平均 122.5。現在値 120 は含み損、125 は含み益
+    assert _checks(position_history_objections(buy_signal, 120.0, lots, None, date(2026, 9, 1))) == {"averaging_down"}
+    assert position_history_objections(buy_signal, 125.0, lots, None, date(2026, 9, 1)) == []
+
+
+def test_max_open_lots(buy_signal, history_rules):
+    lots = [{"entry_price": 100.0, "quantity": 1}] * 3
+    objs = position_history_objections(buy_signal, 110.0, lots, None, date(2026, 9, 1))
+    assert _checks(objs) == {"max_open_lots"}
+
+
+def test_reentry_cooldown_blocks_within_window(buy_signal, history_rules):
+    # 2026-08-26(水)に損失決済 → 2026-08-31(月)は3営業日後 → ブロック
+    objs = position_history_objections(buy_signal, 100.0, [], date(2026, 8, 26), date(2026, 8, 31))
+    assert _checks(objs) == {"reentry_cooldown"}
+
+
+def test_reentry_cooldown_allows_after_window(buy_signal, history_rules):
+    assert position_history_objections(buy_signal, 100.0, [], date(2026, 8, 26), date(2026, 9, 2)) == []
+
+
+def test_sell_signal_is_never_blocked(sell_signal, history_rules):
+    lots = [{"entry_price": 300.0, "quantity": 1}]
+    assert position_history_objections(sell_signal, 100.0, lots, date(2026, 8, 30), date(2026, 8, 31)) == []
+
+
+def test_rules_can_be_disabled(buy_signal, monkeypatch):
+    monkeypatch.setattr(settings, "block_averaging_down", False)
+    monkeypatch.setattr(settings, "max_open_lots_per_ticker", 0)
+    monkeypatch.setattr(settings, "reentry_cooldown_business_days", 0)
+    lots = [{"entry_price": 300.0, "quantity": 1}] * 5
+    assert position_history_objections(buy_signal, 100.0, lots, date(2026, 8, 30), date(2026, 8, 31)) == []
+
+
+def test_hard_reject_drives_confidence_below_threshold(buy_signal, history_rules):
+    """penalty=1.0 なので元の信頼度に関わらず承認閾値を下回る"""
+    objs = position_history_objections(
+        buy_signal, 90.0, [{"entry_price": 100.0, "quantity": 1}], None, date(2026, 9, 1))
+    assert max(buy_signal.confidence - sum(o.penalty for o in objs), 0.0) < APPROVAL_THRESHOLD

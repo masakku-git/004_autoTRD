@@ -43,6 +43,14 @@ class Settings(BaseSettings):
     # （2026-09-11 WFC/KO/C、09-17 GILD、09-18 CVX/GOOGL）。
     market_order_cash_reserve_pct: float = 0.18
 
+    # 同一銘柄への買い増し制御（Critic の check_position_history。BUYのみ対象、却下は hard reject）
+    # 含み損中（現在値 < OPENロットの加重平均取得単価）の買い増し＝ナンピンを禁止する
+    block_averaging_down: bool = True
+    # 同一銘柄の同時OPENロット数の上限（0で無効）
+    max_open_lots_per_ticker: int = 3
+    # 損失決済した銘柄への再エントリーを、決済日から何営業日ブロックするか（0で無効）
+    reentry_cooldown_business_days: int = 5
+
     # 自動売買のポジション数カウントから除外するティッカー（キャンペーン取得株など、
     # 保有しているがシステム管理下ではない銘柄）。
     # ただし、システム自身が新規エントリーして trade_log に OPEN レコードを持つ場合は

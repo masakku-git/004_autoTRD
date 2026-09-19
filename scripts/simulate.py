@@ -22,6 +22,7 @@ from pathlib import Path
 # プロジェクトルートをパスに追加
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+import numpy as np
 import pandas as pd
 import yfinance as yf
 
@@ -312,9 +313,27 @@ def _recent_loss_check_local(closed_trades: list[dict], sim_date: date):
     return check
 
 
+def _position_history_check_local(open_positions: list[dict], closed_trades: list[dict],
+                                  sim_date: date):
+    """本番 check_position_history のインメモリ版（買い増し・再エントリー制御）。"""
+    def check(signal: Signal, df: pd.DataFrame, market_condition: dict):
+        if signal.action != "BUY":
+            return []
+        lots = [{"entry_price": p["entry_price"], "quantity": p["qty"]}
+                for p in open_positions if p["ticker"] == signal.ticker]
+        losses = [t["exit_date"] for t in closed_trades
+                  if t["ticker"] == signal.ticker and t["pnl"] < 0 and t["exit_date"] <= sim_date]
+        # 本番は翌営業日(JST)に判定するので today は sim_date の翌営業日
+        today = pd.Timestamp(np.busday_offset(sim_date, 1, roll="forward")).date()
+        return critic_mod.position_history_objections(
+            signal, float(df["Close"].iloc[-1]), lots, max(losses) if losses else None, today)
+    return check
+
+
 def evaluate_signal_local(
     signal: Signal, df: pd.DataFrame, market_condition: dict,
     closed_trades: list[dict] | None = None, sim_date: date | None = None,
+    open_positions: list[dict] | None = None,
 ) -> dict:
     """本番 src/strategy/critic.py の全チェックをそのまま適用する（DB書き込みなし）。
 
@@ -326,6 +345,9 @@ def evaluate_signal_local(
     for check_fn in critic_mod.ALL_CHECKS:
         if check_fn is critic_mod.check_recent_loss_on_same_ticker:
             check_fn = _recent_loss_check_local(closed_trades, sim_date or date.max)
+        elif check_fn is critic_mod.check_position_history:
+            check_fn = _position_history_check_local(
+                open_positions or [], closed_trades, sim_date or date.max)
         try:
             objections.extend(check_fn(signal, df, market_condition))
         except Exception as e:
@@ -594,7 +616,7 @@ def simulate_one_day(
         signal = strategy.generate_signals(ticker, df_slice, market_condition)
         if signal and signal.action == "SELL":
             verdict = evaluate_signal_local(signal, df_slice, market_condition,
-                                            portfolio.closed_trades, sim_date)
+                                            portfolio.closed_trades, sim_date, portfolio.positions)
             if verdict["approved"]:
                 signal.confidence = verdict["adjusted_confidence"]
                 sell_signals.append((signal, strategy.name))
@@ -612,7 +634,7 @@ def simulate_one_day(
             signal = strategy.generate_signals(ticker, df_slice, market_condition)
             if signal and signal.action == "BUY":
                 verdict = evaluate_signal_local(signal, df_slice, market_condition,
-                                                portfolio.closed_trades, sim_date)
+                                                portfolio.closed_trades, sim_date, portfolio.positions)
                 if verdict["approved"]:
                     signal.confidence = verdict["adjusted_confidence"]
                     signal.screen_score = float(candidate.get("score", 0.0))
