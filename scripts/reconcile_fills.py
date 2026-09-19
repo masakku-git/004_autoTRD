@@ -19,7 +19,7 @@ import argparse
 import sys
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FuturesTimeoutError
-from datetime import timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -89,6 +89,24 @@ def _fetch_broker_orders(days: int) -> dict:
             raise RuntimeError(
                 f"OpenD接続タイムアウト（{_OPEND_TIMEOUT_SEC}秒）— OpenDのセッションを確認してください"
             )
+
+
+def broker_time_to_utc(text) -> datetime | None:
+    """moomoo の注文時刻（米国東部時間の文字列。例 '2026-06-08 09:30:01.203'）を naive UTC に変換する。
+
+    解釈できなければ None（呼び出し側は現在時刻で代用する）。
+    """
+    from zoneinfo import ZoneInfo
+
+    if not text or str(text) in ("N/A", "nan"):
+        return None
+    for fmt in ("%Y-%m-%d %H:%M:%S.%f", "%Y-%m-%d %H:%M:%S"):
+        try:
+            et = datetime.strptime(str(text), fmt).replace(tzinfo=ZoneInfo("America/New_York"))
+            return et.astimezone(ZoneInfo("UTC")).replace(tzinfo=None)
+        except ValueError:
+            continue
+    return None
 
 
 _PROBE_REF_TICKERS = ("T", "KO")  # 買付余力の照会に使う参照銘柄（株価が低く、1株単位の分解能が細かい順）
@@ -337,7 +355,8 @@ def reconcile(days: int, dry_run: bool) -> dict:
                 )
                 if not dry_run:
                     order.filled_price = dealt_price
-                    order.filled_at = utcnow()
+                    # 約定時刻は moomoo の updated_time を使う（過去分をバックフィルしても実際の約定時刻が入る）
+                    order.filled_at = broker_time_to_utc(broker.get("updated_time")) or utcnow()
                     order.status = "FILLED"
                     _update_trade_log(session, order, dealt_price)
                 counts["filled"] += 1

@@ -25,3 +25,13 @@ def test_line_without_ref_and_without_sells():
 def test_us_cash_none_falls_back_to_cash():
     funds = {**FUNDS, "us_cash": None}
     assert "cash_implied=31" in build_probe_line("x", funds, ("T", 25.4, 31), [])
+
+
+def test_broker_time_is_converted_from_eastern_to_utc():
+    from reconcile_fills import broker_time_to_utc
+
+    # 6月は夏時間(EDT=UTC-4): 寄付き 09:30 ET = 13:30 UTC
+    assert broker_time_to_utc("2026-06-08 09:30:01.203").isoformat() == "2026-06-08T13:30:01.203000"
+    # 冬時間(EST=UTC-5)
+    assert broker_time_to_utc("2026-12-08 09:30:01.203").hour == 14
+    assert broker_time_to_utc("N/A") is None and broker_time_to_utc("") is None and broker_time_to_utc("bad") is None
