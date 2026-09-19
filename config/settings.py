@@ -35,6 +35,13 @@ class Settings(BaseSettings):
     risk_per_trade_pct: float = 0.01        # 1トレードあたりのリスク（資産の1%）
     max_portfolio_exposure_pct: float = 0.90  # ポートフォリオ全体のエクスポージャー上限（90%）
     daily_loss_limit_pct: float = 0.03      # 日次損失上限（3%超で新規エントリー停止）
+    # 成行買い注文が発注時に拘束する現金の上乗せ率。moomoo(JP現物口座)は成行買いで
+    # 「現在値×数量」ではなく現在値より約15〜17%高い額で買付余力を見積もる。
+    # 実測(2026-09-19, acctradinginfo_query MARKET, 現金$788.76): T/VZ/PFE/BAC の最大買付数から
+    # 上乗せ率は 15.1%〜17.2% の範囲。安全側に切り上げて 18%。
+    # これを見込まないと、現金の83〜87%を超える買い注文が "Insufficient buying power" で失敗する
+    # （2026-09-11 WFC/KO/C、09-17 GILD、09-18 CVX/GOOGL）。
+    market_order_cash_reserve_pct: float = 0.18
 
     # 自動売買のポジション数カウントから除外するティッカー（キャンペーン取得株など、
     # 保有しているがシステム管理下ではない銘柄）。

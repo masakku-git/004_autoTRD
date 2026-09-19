@@ -20,6 +20,26 @@ class AccountInfo:
     positions: list[dict]  # [{ticker, qty, avg_price, market_value, pnl}]
 
 
+def _pick_usd_cash(funds) -> float:
+    """accinfo_query の結果からUSD現金を取り出す。
+
+    公式ドキュメントで `cash` は obsolete（通貨別の us_cash に移行済み）。us_cash を優先し、
+    無い/数値でない（"N/A"）場合のみ cash にフォールバックする。
+    現物口座では cash == us_cash == usd_net_cash_power == avl_withdrawal_cash（2026-09-19実測）。
+    ※ この値は「発注に使える額」ではない。成行買いは上乗せ込みで拘束される点は
+    settings.market_order_cash_reserve_pct を参照。
+    """
+    for col in ("us_cash", "cash"):
+        if col in funds.columns:
+            try:
+                value = float(funds[col].iloc[0])
+            except (TypeError, ValueError):
+                continue
+            if value == value:  # NaN除外
+                return value
+    raise RuntimeError("accinfo_query に us_cash/cash がありません")
+
+
 def get_account_info() -> AccountInfo:
     """moomooから口座残高とポジションを取得（DRY_RUN時はシミュレーション値）"""
     if settings.dry_run:
@@ -53,7 +73,7 @@ def get_account_info() -> AccountInfo:
                     raise RuntimeError(f"Account query failed: {funds}")
 
                 total_equity = float(funds["total_assets"].iloc[0])
-                cash = float(funds["cash"].iloc[0])
+                cash = _pick_usd_cash(funds)
                 market_value = float(funds["market_val"].iloc[0])
 
                 ret, pos_df = ctx.position_list_query(

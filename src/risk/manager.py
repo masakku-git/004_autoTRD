@@ -14,6 +14,7 @@ class TradeApproval:
     approved: bool
     quantity: int
     reason: str
+    reduced_from: int | None = None  # 現金制約で数量を切り下げた場合の元の数量
 
 
 def _open_trade_tickers() -> set[str]:
@@ -167,14 +168,31 @@ def approve_trade(
             )
 
     # Rule 6: Cannot exceed available cash
-    if quantity * entry_estimate > available_cash:
-        quantity = int(available_cash / entry_estimate)
-        if quantity <= 0:
+    # 成行買いは発注時に「現在値×(1+market_order_cash_reserve_pct)」で現金を拘束される
+    # ため、現金の判定はその上乗せ後の単価で行う（exposure枠は実コストで判定）。
+    # 上乗せを見込まないと承認後にブローカーが "Insufficient buying power" で拒否する。
+    reduced_from = None
+    cash_unit = entry_estimate * (1 + settings.market_order_cash_reserve_pct)
+    max_qty_by_cash = int(account.cash / cash_unit)
+    max_qty_by_exposure = int((max_investment - account.market_value) / entry_estimate)
+    max_qty = min(max_qty_by_cash, max_qty_by_exposure)
+    if quantity > max_qty:
+        if max_qty <= 0:
             return TradeApproval(
-                approved=False, quantity=0, reason="Insufficient cash"
+                approved=False,
+                quantity=0,
+                reason=(
+                    f"Insufficient cash (cash=${account.cash:.2f}, "
+                    f"1株の拘束額=${cash_unit:.2f}"
+                    f"[現在値${entry_estimate:.2f}+成行拘束{settings.market_order_cash_reserve_pct:.0%}])"
+                ),
             )
+        reduced_from = quantity
+        quantity = max_qty
 
     regime_info = f", regime_mult={regime_mult}" if regime_mult < 1.0 else ""
+    if reduced_from is not None:
+        regime_info += f", 現金制約で{reduced_from}→{quantity}株に縮小"
     logger.info(
         f"Trade approved: {signal.ticker} qty={quantity}, "
         f"risk=${risk_amount:.2f}, est_cost=${quantity * entry_estimate:.2f}{regime_info}"
@@ -183,6 +201,7 @@ def approve_trade(
         approved=True,
         quantity=quantity,
         reason=f"Approved: {quantity} shares, risk=${risk_amount:.2f}{regime_info}",
+        reduced_from=reduced_from,
     )
 
 

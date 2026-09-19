@@ -21,6 +21,7 @@ def _isolated_settings(monkeypatch):
     monkeypatch.setattr(settings, "risk_per_trade_pct", 0.02)
     monkeypatch.setattr(settings, "max_portfolio_exposure_pct", 0.90)
     monkeypatch.setattr(settings, "daily_loss_limit_pct", 0.03)
+    monkeypatch.setattr(settings, "market_order_cash_reserve_pct", 0.18)
     monkeypatch.setattr(settings, "ignored_tickers", [])
     monkeypatch.setattr(risk_manager, "_open_trade_tickers", lambda: set())
 
@@ -115,3 +116,39 @@ class TestDailyLossLimit:
 
     def test_no_previous(self, account):
         assert check_daily_loss_limit(account, 0.0) is False
+
+
+def _buy_signal(price: float, stop: float) -> Signal:
+    return Signal(
+        ticker="XYZ", action="BUY", confidence=0.8,
+        stop_loss=stop, take_profit=price * 1.1, reason="t", price=price,
+    )
+
+
+def test_cash_check_includes_market_order_reserve():
+    """現金は「現在値×(1+上乗せ率)」で判定する。
+
+    2026-09-11: 現金$1,228.73 に対し VZ($649.61)承認後の残$579.12 で WFC($536.70)を承認したが、
+    成行の拘束は約15〜17%増しのためブローカーが余力不足で拒否した。
+    """
+    acct = AccountInfo(total_equity=3300.0, cash=579.12, market_value=1500.0, positions=[])
+    sig = _buy_signal(price=89.45, stop=80.0)  # リスク$9.45/株 → 数量は現金制約が支配
+    res = approve_trade(sig, acct)
+    assert res.approved
+    # 上乗せなしなら int(579.12/89.45)=6 株だが、拘束 89.45*1.18=105.55/株 → 5 株
+    assert res.quantity == 5
+    assert res.quantity * 89.45 * 1.18 <= 579.12
+    assert res.reduced_from is not None and res.reduced_from > res.quantity
+
+
+def test_cash_check_rejects_when_reserve_makes_one_share_unaffordable():
+    acct = AccountInfo(total_equity=3300.0, cash=100.0, market_value=1000.0, positions=[])
+    res = approve_trade(_buy_signal(price=90.0, stop=80.0), acct)  # 90*1.18=106.2 > 100
+    assert not res.approved
+    assert "Insufficient cash" in res.reason
+
+
+def test_no_reduction_when_cash_is_ample(account):
+    res = approve_trade(_buy_signal(price=100.0, stop=95.0), account)
+    assert res.approved
+    assert res.reduced_from is None

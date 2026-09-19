@@ -419,11 +419,16 @@ def run_daily():
                 "est_cost": est_cost,
                 "reason": signal.reason,
                 "status": order.status,
+                "reduced_from": approval.reduced_from,
             }
             if order.status in ("SUBMITTED", "DRY_RUN"):
                 executed_orders.append(entry)
-                # 発注済コストを現金から差し引き、次の銘柄の承認判断に反映する
-                account.cash = max(0.0, account.cash - est_cost)
+                # 発注済コストを現金から差し引き、次の銘柄の承認判断に反映する。
+                # 成行買いは約定までブローカー側で上乗せ込みの額が拘束されるので、
+                # 同じ上乗せ率で差し引く（差し引かないと後続の発注が余力不足になる）。
+                account.cash = max(
+                    0.0, account.cash - est_cost * (1 + settings.market_order_cash_reserve_pct)
+                )
             else:
                 failed_orders.append(entry)
         else:
@@ -678,6 +683,8 @@ def _build_summary(
                 f"  SL:${sl:.2f}  TP:${tp:.2f}"
                 f"  推定コスト:${cost:.2f}"
             )
+            if o.get("reduced_from"):
+                lines.append(f"    ※ 現金制約で{o['reduced_from']}株→{o['qty']}株に縮小")
             lines.append(f"    理由: {o['reason'][:80]}")
         for o in sell_exec:
             lines.append(
