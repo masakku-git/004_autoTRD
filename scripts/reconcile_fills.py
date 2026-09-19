@@ -91,6 +91,101 @@ def _fetch_broker_orders(days: int) -> dict:
             )
 
 
+_PROBE_REF_TICKERS = ("T", "KO")  # 買付余力の照会に使う参照銘柄（株価が低く、1株単位の分解能が細かい順）
+
+
+def build_probe_line(label: str, funds: dict, ref: tuple | None, sells_today: list[tuple]) -> str:
+    """売却約定後に売却代金が買付余力として使えているかを判定するための1行ログを組み立てる（純粋関数）。
+
+    funds: accinfo_query の cash/us_cash/avl_withdrawal_cash/frozen_cash/power
+    ref: (参照銘柄, 参照価格, max_cash_buy) または None
+    sells_today: 当日約定の売り [(銘柄, 株数, 約定価格)]
+    読み方: max_cash_buy(指値・参照価格) が cash/参照価格 とほぼ一致すれば、売却代金を含む現金全体が
+    買付余力として使えている。売却代金分だけ少なければ、その分は未受渡で使えていない。
+    """
+    proceeds = sum(q * px for _, q, px in sells_today)
+    parts = [
+        f"label={label}",
+        f"cash={funds.get('cash')}", f"us_cash={funds.get('us_cash')}",
+        f"avl_withdrawal_cash={funds.get('avl_withdrawal_cash')}",
+        f"frozen_cash={funds.get('frozen_cash')}", f"power={funds.get('power')}",
+        f"sells_today={[f'{s}x{q}@{px:.2f}' for s, q, px in sells_today]}",
+        f"sell_proceeds={proceeds:.2f}",
+    ]
+    if ref is not None:
+        tk, px, max_buy = ref
+        cash = funds.get("us_cash") if funds.get("us_cash") is not None else funds.get("cash")
+        implied = int(float(cash) // px) if cash is not None and px else None
+        without = int((float(cash) - proceeds) // px) if cash is not None and px else None
+        parts.append(
+            f"ref={tk}@{px:.2f} max_cash_buy={max_buy} cash_implied={implied} "
+            f"if_proceeds_unusable={without}"
+        )
+    return "BUYPOWER-PROBE " + " ".join(parts)
+
+
+def _query_probe(ref_price_lookup) -> tuple[dict, tuple | None]:
+    """accinfo_query と acctradinginfo_query（指値, 参照銘柄）で現在の現金と買付余力を読む（読み取りのみ）。"""
+    from moomoo import Currency, OrderType
+
+    def _q() -> tuple[dict, tuple | None]:
+        ctx = _open_ctx()
+        try:
+            ret, f = ctx.accinfo_query(trd_env=_trd_env(), currency=Currency.USD, acc_id=settings.moomoo_acc_id)
+            if ret != 0:
+                raise RuntimeError(f"accinfo_query failed: {f}")
+            funds = {k: f[k].iloc[0] for k in ("cash", "us_cash", "avl_withdrawal_cash", "frozen_cash", "power") if k in f}
+            funds = {k: (None if v != v or v == "N/A" else v) for k, v in funds.items()}
+            ref = None
+            for tk in _PROBE_REF_TICKERS:
+                px = ref_price_lookup(tk)
+                if not px:
+                    continue
+                ret, d = ctx.acctradinginfo_query(
+                    order_type=OrderType.NORMAL, code=f"US.{tk}", price=float(px),
+                    trd_env=_trd_env(), acc_id=settings.moomoo_acc_id,
+                )
+                if ret == 0:
+                    ref = (tk, float(px), int(d.iloc[0]["max_cash_buy"]))
+                    break
+            return funds, ref
+        finally:
+            ctx.close()
+
+    with ThreadPoolExecutor(max_workers=1) as ex:
+        future = ex.submit(_q)
+        try:
+            return future.result(timeout=_OPEND_TIMEOUT_SEC)
+        except FuturesTimeoutError:
+            raise RuntimeError(f"OpenD接続タイムアウト（{_OPEND_TIMEOUT_SEC}秒）— 買付余力の照会に失敗")
+
+
+def probe_buying_power(label: str = "post_fill") -> str:
+    """当日約定した売りの代金が買付余力として使えているかを、読み取りのみで記録する。
+
+    売却と購入の実行タイミングを分ける設計（future_improvements.md）の前提確認用。
+    reconcile は寄付き約定の後（01:00 JST）に走るので、「同じ米国営業日の約定直後」の状態を見られる。
+    失敗しても呼び出し元の処理には影響させない（ログのみ）。
+    """
+    from src.data.fetcher import get_ohlcv
+
+    def _last_close(tk: str):
+        df = get_ohlcv(tk, ensure_updated=False)
+        return None if df.empty else float(df["Close"].iloc[-1])
+
+    today = utcnow().date()
+    with get_session() as session:
+        sold = session.execute(
+            select(Order).where(Order.side == "SELL", Order.status == "FILLED", Order.filled_price.isnot(None))
+        ).scalars().all()
+        sells_today = [(o.ticker, o.quantity, float(o.filled_price)) for o in sold
+                       if o.created_at is not None and o.created_at.date() == today]
+    funds, ref = _query_probe(_last_close)
+    line = build_probe_line(label, funds, ref, sells_today)
+    logger.info(line)
+    return line
+
+
 _FEE_BATCH = 400  # order_fee_query は1リクエスト最大400注文（レート制限: 30秒10回）
 
 
@@ -284,6 +379,10 @@ def main() -> None:
     args = parser.parse_args()
     try:
         reconcile(days=args.days, dry_run=args.dry_run)
+        try:
+            probe_buying_power("post_fill")
+        except Exception:
+            logger.exception("買付余力の記録に失敗（約定照合には影響なし）")
         try:
             sync_commissions(dry_run=args.dry_run)
         except Exception as e:
