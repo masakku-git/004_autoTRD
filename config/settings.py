@@ -35,6 +35,9 @@ class Settings(BaseSettings):
     risk_per_trade_pct: float = 0.01        # 1トレードあたりのリスク（資産の1%）
     max_portfolio_exposure_pct: float = 0.90  # ポートフォリオ全体のエクスポージャー上限（90%）
     daily_loss_limit_pct: float = 0.03      # 日次損失上限（3%超で新規エントリー停止）
+    # ピーク資産（portfolio_snapshots の最大 total_equity）からの下落率による歯止め。0で無効。
+    drawdown_halt_pct: float = 0.08         # 8%超で新規エントリー停止（売却・損切りは継続）
+    drawdown_alert_pct: float = 0.12        # 12%超で緊急通知（自動での強制縮小はしない）
     # 成行買い注文が発注時に拘束する現金の上乗せ率。moomoo(JP現物口座)は成行買いで
     # 「現在値×数量」ではなく現在値より約15〜17%高い額で買付余力を見積もる。
     # 実測(2026-09-19, acctradinginfo_query MARKET, 現金$788.76): T/VZ/PFE/BAC の最大買付数から

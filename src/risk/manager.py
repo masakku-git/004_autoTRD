@@ -221,3 +221,39 @@ def check_daily_loss_limit(account: AccountInfo, prev_equity: float) -> bool:
         )
         return True
     return False
+
+
+def check_drawdown(current_equity: float, peak_equity: float) -> tuple[str, float]:
+    """ピーク資産比の下落率から歯止めの段階を返す。
+
+    Returns:
+        ("ok" | "halt" | "severe", 下落率[0-1])
+        halt  : drawdown_halt_pct 超 → 新規エントリー停止（売却・損切りは継続）
+        severe: drawdown_alert_pct 超 → 停止に加えて緊急通知（自動の強制縮小はしない）
+    ピークが取れない（<=0）場合は判定しない。入出金は区別できないため、
+    大きな出金があるとドローダウンに見える点に注意。
+    """
+    if peak_equity <= 0 or current_equity <= 0:
+        return "ok", 0.0
+    dd = max(0.0, 1 - current_equity / peak_equity)
+    if settings.drawdown_alert_pct > 0 and dd > settings.drawdown_alert_pct:
+        return "severe", dd
+    if settings.drawdown_halt_pct > 0 and dd > settings.drawdown_halt_pct:
+        return "halt", dd
+    return "ok", dd
+
+
+def register_pending_buy(account: AccountInfo, ticker: str, est_cost: float) -> None:
+    """発注済み（未約定）の買いを、以降の承認判断に見える形で account に反映する。
+
+    account.cash だけ差し引いて market_value / positions を更新しないと、同じ実行内の
+    後続の買いが「エクスポージャ上限」「最大ポジション数」を過小評価して承認される。
+    （2026-09-11: 時価$2,118・上限$3,012 の状態でVZ$650とV$367を続けて承認し、
+    エクスポージャが94%に達した）
+    """
+    account.market_value += est_cost
+    held = {p["ticker"].replace("US.", "").upper() for p in account.positions}
+    if ticker.upper() not in held:
+        account.positions.append(
+            {"ticker": ticker, "qty": 0, "avg_price": 0.0, "market_value": est_cost, "pnl": 0.0}
+        )

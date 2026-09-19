@@ -22,7 +22,13 @@ from src.data.fetcher import get_ohlcv
 from src.data.screener import run_screening
 from src.models.base import get_session, init_db
 from src.notify.notifier import send_notification
-from src.risk.manager import TradeApproval, approve_trade, check_daily_loss_limit
+from src.risk.manager import (
+    TradeApproval,
+    approve_trade,
+    check_daily_loss_limit,
+    check_drawdown,
+    register_pending_buy,
+)
 from src.strategy.base import Signal
 from src.strategy.critic import evaluate_signal
 from src.strategy.registry import discover_strategies, get_strategy
@@ -67,6 +73,20 @@ def run_daily():
         msg = "日次損失上限に到達 — 新規エントリーを停止します（売却は継続）"
         logger.warning(msg)
         send_notification("新規エントリー停止", msg, level="warning")
+        block_new_entries = True
+
+    # ピーク資産比のドローダウンによる歯止め（日次損失上限とは別軸）。売却は継続する。
+    dd_status, dd = check_drawdown(account.total_equity, _get_peak_equity())
+    if dd_status != "ok":
+        level = "error" if dd_status == "severe" else "warning"
+        msg = (
+            f"ピーク資産比 -{dd*100:.1f}% のドローダウン（停止ライン -{settings.drawdown_halt_pct*100:.0f}%）"
+            " — 新規エントリーを停止します（売却は継続）"
+        )
+        if dd_status == "severe":
+            msg += f"\n⚠ 緊急ライン(-{settings.drawdown_alert_pct*100:.0f}%)超過。ポジションの手動確認を推奨します。"
+        logger.warning(msg)
+        send_notification("ドローダウン — 新規エントリー停止", msg, level=level)
         block_new_entries = True
 
     buy_signals = []
@@ -429,6 +449,8 @@ def run_daily():
                 account.cash = max(
                     0.0, account.cash - est_cost * (1 + settings.market_order_cash_reserve_pct)
                 )
+                # 時価・ポジション数にも反映（未反映だとエクスポージャ/最大ポジション数の判定が甘くなる）
+                register_pending_buy(account, signal.ticker, est_cost)
             else:
                 failed_orders.append(entry)
         else:
@@ -561,6 +583,16 @@ def _update_highest_price(ticker: str, today_high: float) -> None:
             if today_high > baseline:
                 trade.highest_price = today_high
         session.commit()
+
+
+def _get_peak_equity() -> float:
+    """portfolio_snapshots の最大 total_equity（ピーク資産）。無ければ 0。"""
+    from sqlalchemy import func, select
+
+    from src.models.portfolio import PortfolioSnapshot
+
+    with get_session() as session:
+        return float(session.execute(select(func.max(PortfolioSnapshot.total_equity))).scalar() or 0.0)
 
 
 def _get_previous_equity() -> float:

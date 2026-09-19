@@ -659,6 +659,11 @@ def simulate_one_day(
                 f"(損益: ${trade['pnl']:+.2f} / {trade['pnl_pct']:+.1f}%) [{signal.reason[:50]}]")
 
     buy_signals.sort(key=lambda s: s[0].screen_score, reverse=True)
+    # ピーク資産比ドローダウンによる新規エントリー停止（本番 check_drawdown と同じ判定）
+    peak = max((s["total_equity"] for s in portfolio.daily_snapshots), default=0.0)
+    dd_status, _dd = risk_mod.check_drawdown(portfolio.get_total_equity(current_prices), peak)
+    if dd_status != "ok":
+        buy_signals = []
     account_cash = portfolio.cash
     total_eq = portfolio.get_total_equity(current_prices)
     mv = portfolio.get_market_value(current_prices)
@@ -677,7 +682,11 @@ def simulate_one_day(
                                 stop_loss=signal.stop_loss, take_profit=signal.take_profit,
                                 take_profit_1=getattr(signal, "take_profit_1", 0.0),
                                 max_hold_days=signal.max_hold_days)
-            account_cash = max(0.0, account_cash - (signal.price * qty if signal.price else 0))
+            est_cost = signal.price * qty if signal.price else 0
+            account_cash = max(0.0, account_cash - est_cost * (1 + settings.market_order_cash_reserve_pct))
+            mv += est_cost  # 本番 register_pending_buy と同じ（時価・ポジション数へ反映）
+            if signal.ticker not in {p["ticker"] for p in held_positions}:
+                held_positions.append({"ticker": signal.ticker})
             if pos:
                 day_report["executed"].append(
                     f"BUY {qty}x {signal.ticker} @ ${fill:.2f} "

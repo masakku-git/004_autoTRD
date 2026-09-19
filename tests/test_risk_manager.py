@@ -152,3 +152,59 @@ def test_no_reduction_when_cash_is_ample(account):
     res = approve_trade(_buy_signal(price=100.0, stop=95.0), account)
     assert res.approved
     assert res.reduced_from is None
+
+
+# ---------------------------------------------------------------------------
+# ドローダウン歯止め / 未約定買いの反映
+# ---------------------------------------------------------------------------
+from src.risk.manager import check_drawdown, register_pending_buy  # noqa: E402
+
+
+@pytest.fixture
+def dd_settings(monkeypatch):
+    monkeypatch.setattr(settings, "drawdown_halt_pct", 0.08)
+    monkeypatch.setattr(settings, "drawdown_alert_pct", 0.12)
+
+
+def test_drawdown_levels(dd_settings):
+    assert check_drawdown(3300.0, 3300.0)[0] == "ok"
+    assert check_drawdown(3300.0 * 1.01, 3300.0)[0] == "ok"       # ピーク超え
+    assert check_drawdown(3300.0 * 0.93, 3300.0)[0] == "ok"       # -7%
+    assert check_drawdown(3300.0 * 0.91, 3300.0)[0] == "halt"     # -9%
+    assert check_drawdown(3300.0 * 0.87, 3300.0)[0] == "severe"   # -13%
+
+
+def test_drawdown_disabled_and_no_peak(monkeypatch):
+    monkeypatch.setattr(settings, "drawdown_halt_pct", 0.0)
+    monkeypatch.setattr(settings, "drawdown_alert_pct", 0.0)
+    assert check_drawdown(1000.0, 3300.0)[0] == "ok"
+    assert check_drawdown(1000.0, 0.0)[0] == "ok"
+
+
+def test_pending_buys_consume_exposure_and_position_slots():
+    """同じ実行内の後続の買いが、発注済みの買いを考慮して判定される。
+
+    2026-09-11: 時価$2,118・上限$3,012(90%)の状態で VZ($650)・V($367) を続けて承認し、
+    エクスポージャが94%に達した。発注済み分を market_value に反映すれば V は縮小される。
+    """
+    acct = AccountInfo(
+        total_equity=3346.52, cash=1228.73, market_value=2117.79,
+        positions=[{"ticker": f"US.T{i}", "qty": 1} for i in range(2)],
+    )
+    first = approve_trade(_buy_signal(price=49.97, stop=45.0), acct)
+    assert first.approved
+    register_pending_buy(acct, "VZ", first.quantity * 49.97)
+    assert acct.market_value > 2117.79 and len(acct.positions) == 3
+
+    second = approve_trade(_buy_signal(price=367.21, stop=340.0), acct)
+    max_investment = 3346.52 * 0.90
+    if second.approved:
+        assert acct.market_value + second.quantity * 367.21 <= max_investment + 1e-6
+
+
+def test_pending_buy_same_ticker_does_not_add_position_slot():
+    acct = AccountInfo(total_equity=3000.0, cash=1000.0, market_value=500.0,
+                       positions=[{"ticker": "US.KO", "qty": 3}])
+    register_pending_buy(acct, "KO", 100.0)
+    assert len(acct.positions) == 1
+    assert acct.market_value == 600.0

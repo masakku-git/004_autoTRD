@@ -46,6 +46,7 @@ def patched(monkeypatch):
     monkeypatch.setattr(main, "init_db", lambda: None)
     monkeypatch.setattr(main, "discover_strategies", lambda: 1)
     monkeypatch.setattr(main, "_get_previous_equity", lambda: 0.0)
+    monkeypatch.setattr(main, "_get_peak_equity", lambda: 0.0)
     monkeypatch.setattr(main, "_update_highest_price", lambda t, h: None)
     monkeypatch.setattr(main, "_get_open_trade_info", lambda t: None)
     monkeypatch.setattr(main, "_get_open_trades", lambda t: [])
@@ -310,3 +311,55 @@ def test_degraded_market_blocks_new_entries(patched, monkeypatch):
     assert any("市場データ取得失敗" in t for t in titles)
     report = next(m for t, m, _ in patched["notifications"] if "日次" in t)
     assert "実行時警告" in report
+
+
+def _buy_setup(patched, monkeypatch, peak_equity):
+    """BUYシグナルが1件出る状況を作る（ドローダウン歯止めの検証用）"""
+    from src.strategy.base import Signal
+
+    class FakeStrategy:
+        name = "fake"
+
+        def generate_signals(self, ticker, df, mc):
+            return Signal(ticker=ticker, action="BUY", confidence=0.8, stop_loss=90.0,
+                          take_profit=120.0, reason="t", price=100.0)
+
+    class Verdict:
+        approved = True
+        adjusted_confidence = 0.8
+
+    class Acct(FakeAccount):
+        market_value = 0.0
+
+    monkeypatch.setattr(main, "_get_peak_equity", lambda: peak_equity)
+    monkeypatch.setattr(main, "get_account_info", lambda: Acct())
+    monkeypatch.setattr(
+        main, "run_screening",
+        lambda: [{"ticker": "NEW", "score": 5.0, "last_close": 100.0, "atr_pct": 2.0,
+                  "relative_strength": 3.0}],
+    )
+    # approve_trade が ignored_tickers 設定時に DB を見に行かないようにする
+    from config.settings import settings
+    monkeypatch.setattr(settings, "ignored_tickers", [])
+    monkeypatch.setattr(main, "select_strategies", lambda mc: [FakeStrategy()])
+    monkeypatch.setattr(main, "get_ohlcv", lambda t, **kw: _ohlcv(close=100.0))
+    monkeypatch.setattr(main, "evaluate_signal", lambda *a, **kw: Verdict())
+    monkeypatch.setattr(main, "create_trade_log", lambda *a, **kw: None)
+
+
+def test_drawdown_over_halt_line_blocks_new_entries(patched, monkeypatch):
+    _buy_setup(patched, monkeypatch, peak_equity=10_000.0 / 0.90)  # 現在は -10%
+
+    main.run_daily()
+
+    assert not [o for o in patched["orders"] if o[1] == "BUY"]
+    assert any("ドローダウン" in t for t, _, _ in patched["notifications"])
+
+
+def test_no_drawdown_allows_new_entries(patched, monkeypatch):
+    _buy_setup(patched, monkeypatch, peak_equity=10_000.0)  # ピークと同じ
+
+    main.run_daily()
+
+    assert [o for o in patched["orders"] if o[1] == "BUY" and o[0] == "NEW"]
+    assert not any("ドローダウン" in t for t, _, _ in patched["notifications"])
