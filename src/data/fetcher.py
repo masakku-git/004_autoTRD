@@ -106,6 +106,18 @@ def fetch_from_yfinance(
         return pd.DataFrame()
 
 
+def _is_index_ticker(ticker: str) -> bool:
+    """Yahoo Finance 表記の指数シンボル（^GSPC, ^VIX 等）か。
+
+    "^GSPC" は yfinance 固有のシンボルで、moomoo には存在しない（"US.^GSPC" を送ると
+    "Unknown stock" になる。文字コードの問題ではなくコード体系の違い）。moomoo の指数コードは
+    別体系（"US..DJI" のように先頭にドットが付く）で、指数の K線が取得できるかも
+    購入済みの相場権限に依存する。確実に取れる yfinance を正規経路にするため、指数は
+    moomoo に問い合わせない。
+    """
+    return ticker.startswith("^")
+
+
 def _ticker_to_moomoo_code(ticker: str) -> str:
     """米国株ティッカーをmoomooのマーケット接頭辞付きコードに変換（例: "AAPL" -> "US.AAPL"）。
 
@@ -398,7 +410,9 @@ def update_price_cache(ticker: str, ctx=None, source: str | None = None) -> int:
         logger.debug(f"{ticker} cache is up to date")
         return 0
 
-    if source == "moomoo":
+    if source == "moomoo" and _is_index_ticker(ticker):
+        df = fetch_from_yfinance(ticker, start)
+    elif source == "moomoo":
         try:
             df = fetch_from_moomoo(ticker, start, ctx=ctx)
         except PriceFetchError as e:

@@ -640,3 +640,27 @@ def test_save_to_cache_inserts_new_days_and_updates_latest(sqlite_price_cache):
     assert len(rows) == 6
     assert rows[4].close == 111.0
     assert rows[5].close == 15.2
+
+
+def test_update_price_cache_index_ticker_skips_moomoo(monkeypatch):
+    """^GSPC/^VIX は moomoo に存在しないコードなので、問い合わせず yfinance を正規経路にする"""
+    from datetime import date, timedelta
+
+    monkeypatch.setattr("src.data.fetcher.settings.data_source", "moomoo")
+    monkeypatch.setattr(
+        "src.data.fetcher.get_last_cached_date",
+        lambda t: date.today() - timedelta(days=10),
+    )
+    monkeypatch.setattr("src.data.fetcher.save_to_cache", lambda t, df: len(df))
+
+    def fail_if_called(*a, **k):
+        raise AssertionError("指数を moomoo に問い合わせてはいけない")
+
+    monkeypatch.setattr("src.data.fetcher.fetch_from_moomoo", fail_if_called)
+    monkeypatch.setattr(
+        "src.data.fetcher.fetch_from_yfinance",
+        lambda ticker, start, end=None: _make_df(),
+    )
+
+    assert update_price_cache("^GSPC") == len(_make_df())
+    assert update_price_cache("^VIX") == len(_make_df())
