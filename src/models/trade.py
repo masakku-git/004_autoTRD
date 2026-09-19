@@ -25,6 +25,8 @@ class Order(Base):
     status: Mapped[str] = mapped_column(String(15), default="PENDING")  # PENDING/SUBMITTED/FILLED/FAILED/DRY_RUN
     filled_price: Mapped[Optional[float]] = mapped_column(Float, nullable=True)  # 約定価格
     filled_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)  # 約定日時
+    # 約定時の手数料合計（USD, moomoo order_fee_query の fee_amount）。NULL=未取得 / 0.0=手数料なし
+    commission: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     strategy_name: Mapped[str] = mapped_column(String(50))
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
 

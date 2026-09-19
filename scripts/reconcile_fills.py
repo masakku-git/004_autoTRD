@@ -91,6 +91,80 @@ def _fetch_broker_orders(days: int) -> dict:
             )
 
 
+_FEE_BATCH = 400  # order_fee_query は1リクエスト最大400注文（レート制限: 30秒10回）
+
+
+def _fetch_commissions(broker_order_ids: list[str]) -> dict[str, float]:
+    """moomoo order_fee_query で注文ごとの手数料合計(fee_amount)を取得する。
+
+    公式: https://openapi.moomoo.com/moomoo-api-doc/en/trade/order-fee-query.html
+    模擬取引口座は手数料を照会できない（REAL のみ）。
+    """
+    if not broker_order_ids:
+        return {}
+
+    def _query() -> dict[str, float]:
+        ctx = _open_ctx()
+        try:
+            result: dict[str, float] = {}
+            for i in range(0, len(broker_order_ids), _FEE_BATCH):
+                chunk = broker_order_ids[i:i + _FEE_BATCH]
+                ret, df = ctx.order_fee_query(
+                    order_id_list=chunk, trd_env=_trd_env(), acc_id=settings.moomoo_acc_id
+                )
+                if ret != 0:
+                    raise RuntimeError(f"moomoo order_fee_query failed: {df}")
+                for _, row in df.iterrows():
+                    fee = row["fee_amount"]
+                    if fee == fee:  # NaN除外
+                        result[str(row["order_id"])] = round(float(fee), 4)
+            return result
+        finally:
+            ctx.close()
+
+    with ThreadPoolExecutor(max_workers=1) as ex:
+        future = ex.submit(_query)
+        try:
+            return future.result(timeout=_OPEND_TIMEOUT_SEC)
+        except FuturesTimeoutError:
+            raise RuntimeError(f"OpenD接続タイムアウト（{_OPEND_TIMEOUT_SEC}秒）— 手数料の取得に失敗")
+
+
+def sync_commissions(dry_run: bool, fetch=_fetch_commissions) -> int:
+    """FILLED なのに commission が未取得(NULL)の注文へ、実手数料を記録する。
+
+    約定確認(reconcile)の直後に走らせる。commission が NULL の FILLED 注文を全件対象にするため、
+    初回実行で過去分のバックフィルも兼ね、取得に失敗した日があっても翌日以降に自動で埋まる。
+    """
+    with get_session() as session:
+        rows = session.execute(
+            select(Order).where(
+                Order.status == "FILLED",
+                Order.broker_order_id.isnot(None),
+                Order.commission.is_(None),
+            )
+        ).scalars().all()
+        if not rows:
+            logger.info("手数料が未取得の約定済み注文はありません")
+            return 0
+
+        fees = fetch([str(o.broker_order_id) for o in rows])
+        updated = 0
+        for order in rows:
+            fee = fees.get(str(order.broker_order_id))
+            if fee is None:
+                logger.warning(f"手数料を取得できず: order id={order.id} {order.ticker}")
+                continue
+            logger.info(f"COMMISSION: order id={order.id} {order.side} {order.ticker} ${fee:.2f}")
+            if not dry_run:
+                order.commission = fee
+            updated += 1
+        if not dry_run:
+            session.commit()
+    logger.info(f"手数料を記録: {updated}/{len(rows)}件 (dry_run={dry_run})")
+    return updated
+
+
 def _update_trade_log(session, order: Order, actual_price: float) -> None:
     """Orderの side に応じて TradeLog の entry_price / exit_price と pnl を更新する。
 
@@ -210,6 +284,19 @@ def main() -> None:
     args = parser.parse_args()
     try:
         reconcile(days=args.days, dry_run=args.dry_run)
+        try:
+            sync_commissions(dry_run=args.dry_run)
+        except Exception as e:
+            # 手数料の取得失敗は約定照合の成否に影響させない（翌日以降に自動で再取得される）
+            logger.exception("手数料の記録に失敗")
+            send_notification(
+                "手数料の記録失敗 (reconcile_fills)",
+                "約定済み注文の手数料(commission)をmoomooから取得できませんでした。\n"
+                "影響: 手数料の集計が一時的に欠けるだけで、売買・損益(pnl)には影響しません。\n"
+                "翌日の実行で未取得分は自動的に再取得されます。\n\n"
+                f"{type(e).__name__}: {e}",
+                level="warning",
+            )
     except Exception as e:
         logger.exception("reconcile_fills failed")
         send_notification(
