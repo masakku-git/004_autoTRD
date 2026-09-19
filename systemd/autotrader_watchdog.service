@@ -1,0 +1,11 @@
+[Unit]
+Description=AutoTRD daily-run watchdog (alerts if today's run did not complete)
+After=network.target
+
+[Service]
+Type=oneshot
+User=trader
+WorkingDirectory=/home/trader/autoTRD
+ExecStart=/home/trader/autoTRD/.venv/bin/python /home/trader/autoTRD/scripts/check_daily_ran.py
+Environment=PYTHONPATH=/home/trader/autoTRD
+EnvironmentFile=/home/trader/autoTRD/.env

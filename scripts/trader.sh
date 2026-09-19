@@ -151,13 +151,18 @@ case "${1}" in
 
   install)
     echo "systemdにサービス・タイマーを登録します..."
-    sudo cp "$PROJECT_DIR/systemd/autotrader.service" /etc/systemd/system/
-    sudo cp "$PROJECT_DIR/systemd/autotrader.timer" /etc/systemd/system/
+    # 日次実行・約定照合・EODスナップショット・ウォッチドッグ・失敗通知(テンプレート)をまとめて登録する。
+    # opend.service は環境依存（OpenDのパス等）なので対象外。
+    for unit in "$PROJECT_DIR"/systemd/autotrader*.service "$PROJECT_DIR"/systemd/autotrader*.timer; do
+      sudo cp "$unit" /etc/systemd/system/
+    done
     sudo systemctl daemon-reload
-    echo "Done: 登録完了"
+    # 日次実行の死活監視（実行40分後に「今日の実行が完了したか」を確認する）
+    sudo systemctl enable --now autotrader_watchdog.timer
+    echo "Done: 登録完了（ウォッチドッグ autotrader_watchdog.timer を有効化しました）"
     echo ""
     echo "次のステップ:"
-    echo "  $0 start    — タイマーを開始"
+    echo "  $0 start    — 日次実行タイマーを開始"
     echo "  $0 status   — 状態を確認"
     ;;
 

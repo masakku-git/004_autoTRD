@@ -1,6 +1,7 @@
 [Unit]
 Description=AutoTRD Fill Reconciliation
 After=network.target opend.service
+OnFailure=autotrader_failure_notify@%n.service
 
 [Service]
 Type=oneshot

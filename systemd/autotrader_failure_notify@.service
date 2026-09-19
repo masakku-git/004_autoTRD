@@ -1,0 +1,10 @@
+[Unit]
+Description=Notify Slack that %i failed
+
+[Service]
+Type=oneshot
+User=trader
+WorkingDirectory=/home/trader/autoTRD
+ExecStart=/home/trader/autoTRD/.venv/bin/python /home/trader/autoTRD/scripts/notify_failure.py %i
+Environment=PYTHONPATH=/home/trader/autoTRD
+EnvironmentFile=/home/trader/autoTRD/.env
