@@ -31,3 +31,5 @@ weeklyReport/
 blog_drafts/
 scripts/gen_weekly_report.py
 scripts/viz_trades.py
+data/dashboard_style0*.html
+scripts/viz_trades_alt.py
